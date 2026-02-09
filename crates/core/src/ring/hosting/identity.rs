@@ -38,6 +38,9 @@ pub struct IdentityVerificationResult {
     pub creator_verified: bool,
     pub subscriber_pubkey: Option<[u8; 32]>,
     pub subscriber_verified: bool,
+    /// The intended recipient from the identity envelope.
+    /// Used by subscription handshake to verify remote subscriber matches.
+    pub recipient_pubkey: Option<[u8; 32]>,
 }
 
 /// Parse a Lepus identity envelope from contract state bytes.
@@ -149,6 +152,7 @@ pub fn verify_identity(state: &[u8]) -> IdentityVerificationResult {
                 creator_verified: false,
                 subscriber_pubkey: None,
                 subscriber_verified: false,
+                recipient_pubkey: None,
             };
         }
     };
@@ -169,6 +173,7 @@ pub fn verify_identity(state: &[u8]) -> IdentityVerificationResult {
         creator_verified,
         subscriber_pubkey: node_pubkey,
         subscriber_verified,
+        recipient_pubkey: Some(envelope.recipient_pubkey),
     }
 }
 

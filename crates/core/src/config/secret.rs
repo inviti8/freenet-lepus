@@ -18,7 +18,7 @@ impl ConfigArgs {
         let transport_keypair = if let Some(ref path_to_key) = path_to_key {
             read_transport_keypair(path_to_key)?
         } else {
-            TransportKeypair::new()
+            stellar_or_random_keypair()
         };
         let nonce = if let Some(ref path_to_nonce) = path_to_nonce {
             read_nonce(path_to_nonce)?
@@ -68,7 +68,7 @@ impl SecretArgs {
         {
             (self.transport_keypair, transport_key)
         } else {
-            let transport_key = TransportKeypair::new();
+            let transport_key = stellar_or_random_keypair();
             (None, transport_key)
         };
         let nonce = self.nonce.as_ref().map(read_nonce).transpose()?;
@@ -199,6 +199,26 @@ fn read_cipher(path_to_cipher: impl AsRef<Path>) -> std::io::Result<[u8; CIPHER_
     })?;
 
     Ok::<_, std::io::Error>(buf)
+}
+
+/// Try to derive a transport keypair from `LEPUS_STELLAR_SECRET` env var.
+/// Falls back to random generation if not set or invalid.
+fn stellar_or_random_keypair() -> TransportKeypair {
+    #[cfg(feature = "lepus")]
+    {
+        if let Ok(hex_str) = std::env::var("LEPUS_STELLAR_SECRET") {
+            if let Ok(bytes) = hex::decode(hex_str.trim()) {
+                if bytes.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&bytes);
+                    tracing::info!("Deriving transport keypair from LEPUS_STELLAR_SECRET");
+                    return TransportKeypair::from_stellar(&arr);
+                }
+            }
+            tracing::warn!("LEPUS_STELLAR_SECRET set but invalid — using random keypair");
+        }
+    }
+    TransportKeypair::new()
 }
 
 fn read_transport_keypair(path_to_key: impl AsRef<Path>) -> std::io::Result<TransportKeypair> {

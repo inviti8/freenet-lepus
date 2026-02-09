@@ -89,6 +89,29 @@ impl Default for TransportKeypair {
 }
 
 impl TransportKeypair {
+    /// Derive transport X25519 keypair from a Stellar Ed25519 secret key.
+    ///
+    /// Standard Ed25519 → X25519 conversion: SHA-512 hash of the secret key,
+    /// take the first 32 bytes, apply clamping (RFC 7748).
+    /// Same conversion used by hvym_stellar's StellarSharedKey for ECDH.
+    #[cfg(feature = "lepus")]
+    pub fn from_stellar(ed25519_secret: &[u8; 32]) -> Self {
+        use sha2::{Digest, Sha512};
+        let hash = Sha512::digest(ed25519_secret);
+        let mut x_bytes = [0u8; 32];
+        x_bytes.copy_from_slice(&hash[..32]);
+        // Apply clamping (standard Ed25519 → X25519 conversion)
+        x_bytes[0] &= 248;
+        x_bytes[31] &= 127;
+        x_bytes[31] |= 64;
+        let secret = StaticSecret::from(x_bytes);
+        let public = PublicKey::from(&secret);
+        TransportKeypair {
+            public: TransportPublicKey(public),
+            secret: TransportSecretKey(secret),
+        }
+    }
+
     pub fn new() -> Self {
         // Generate random bytes for the secret key using GlobalRng
         // This allows deterministic key generation in simulation mode

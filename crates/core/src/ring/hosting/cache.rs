@@ -102,6 +102,9 @@ pub struct IdentityState {
     pub subscriber_pubkey: Option<[u8; 32]>,
     /// Whether the subscriber identity has been verified.
     pub subscriber_verified: bool,
+    /// The intended recipient from the identity envelope (datapod's recipient_public_key).
+    /// Used by subscription handshake to verify the remote subscriber matches.
+    pub recipient_pubkey: Option<[u8; 32]>,
 }
 
 /// Type of access that adds/refreshes a contract in the hosting cache.
@@ -691,16 +694,61 @@ impl<T: TimeSource> HostingCache<T> {
         creator_verified: bool,
         subscriber_pubkey: Option<[u8; 32]>,
         subscriber_verified: bool,
+        recipient_pubkey: Option<[u8; 32]>,
     ) -> bool {
         if let Some(contract) = self.contracts.get_mut(key) {
             contract.identity.creator_pubkey = creator_pubkey;
             contract.identity.creator_verified = creator_verified;
             contract.identity.subscriber_pubkey = subscriber_pubkey;
             contract.identity.subscriber_verified = subscriber_verified;
+            contract.identity.recipient_pubkey = recipient_pubkey;
             true
         } else {
             false
         }
+    }
+
+    /// Update subscriber identity from the subscription handshake.
+    ///
+    /// Verifies whether the declared subscriber pubkey matches the datapod's
+    /// `recipient_pubkey` from the identity envelope, or if the content is public.
+    /// Returns `true` if the key was found.
+    #[cfg(feature = "lepus")]
+    pub fn update_subscriber_identity(
+        &mut self,
+        key: &ContractKey,
+        subscriber_pubkey: &[u8; 32],
+    ) -> bool {
+        if let Some(contract) = self.contracts.get_mut(key) {
+            contract.identity.subscriber_pubkey = Some(*subscriber_pubkey);
+            contract.identity.subscriber_verified = match &contract.identity.recipient_pubkey {
+                Some(recipient) => {
+                    // Public content ([0u8;32]) verifies any subscriber
+                    *recipient == [0u8; 32] || recipient == subscriber_pubkey
+                }
+                None => false, // No envelope parsed yet
+            };
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Count active subscriptions for a given identity pubkey.
+    #[cfg(feature = "lepus")]
+    pub fn count_subscriptions_for_identity(&self, pubkey: &[u8; 32]) -> usize {
+        self.contracts
+            .values()
+            .filter(|c| c.identity.subscriber_pubkey.as_ref() == Some(pubkey))
+            .count()
+    }
+
+    /// Check if a subscriber identity has any funded contract (deposited_xlm > 0).
+    #[cfg(feature = "lepus")]
+    pub fn is_identity_funded(&self, pubkey: &[u8; 32]) -> bool {
+        self.contracts.values().any(|c| {
+            c.identity.subscriber_pubkey.as_ref() == Some(pubkey) && c.commitment.deposited_xlm > 0
+        })
     }
 
     /// Update the commitment deposit for a hosted contract.
@@ -1081,6 +1129,7 @@ mod tests {
                     creator_verified,
                     subscriber_pubkey: None,
                     subscriber_verified,
+                    recipient_pubkey: None,
                 },
                 bytes_served,
                 bytes_consumed,
@@ -1308,6 +1357,338 @@ mod tests {
                 "High-contribution key2 should survive eviction"
             );
             assert!(cache.contains(&key2));
+        }
+
+        // =================================================================
+        // Andromica Datapod Validation Tests (Phase 4)
+        // =================================================================
+
+        /// Typical Andromica datapod: ~2 KB NINJS JSON metadata per subscriber
+        const DATAPOD_SIZE: u64 = 2048;
+        /// Deposit amount that saturates commitment for a 2KB datapod.
+        /// At density_target 0.001: 2048 * 0.001 = 2.048, deposit 10 → score 1.0
+        const DATAPOD_DEPOSIT: u64 = 10;
+
+        /// Helper: set up a datapod contract with commitment + identity.
+        fn setup_datapod(
+            cache: &mut HostingCache<SharedMockTimeSource>,
+            key: ContractKey,
+            deposited_xlm: u64,
+            creator_verified: bool,
+            subscriber_verified: bool,
+        ) {
+            cache.record_access(key, DATAPOD_SIZE, AccessType::Put);
+            cache.update_commitment(&key, deposited_xlm, cache.time_source.now());
+            cache.update_identity(
+                &key,
+                Some([1u8; 32]),
+                creator_verified,
+                if subscriber_verified {
+                    Some([2u8; 32])
+                } else {
+                    None
+                },
+                subscriber_verified,
+                Some([2u8; 32]),
+            );
+        }
+
+        /// Helper: set up a spam contract (no deposit, no identity).
+        fn setup_spam(cache: &mut HostingCache<SharedMockTimeSource>, key: ContractKey, size: u64) {
+            cache.record_access(key, size, AccessType::Get);
+        }
+
+        /// §9/§15 core scenario: 10 bespoke datapods survive while 10 spam contracts
+        /// are evicted first. Budget fits 15 contracts; all 10 datapods survive.
+        #[test]
+        fn test_datapod_gallery_persists_over_spam() {
+            // Budget: 15 * DATAPOD_SIZE
+            let budget = 15 * DATAPOD_SIZE;
+            let (mut cache, time) = make_cache(budget, Duration::from_secs(60));
+
+            // 10 bespoke datapods (committed + identity-verified)
+            let datapod_keys: Vec<_> = (1..=10).map(|i| make_key(i)).collect();
+            for &key in &datapod_keys {
+                setup_datapod(&mut cache, key, DATAPOD_DEPOSIT, true, true);
+            }
+
+            // 10 spam contracts (no deposit, no identity, same size)
+            let spam_keys: Vec<_> = (11..=20).map(|i| make_key(i)).collect();
+            for &key in &spam_keys {
+                setup_spam(&mut cache, key, DATAPOD_SIZE);
+            }
+
+            assert_eq!(cache.len(), 20);
+
+            // Advance past TTL
+            time.advance_time(Duration::from_secs(61));
+
+            // Add 5 more contracts to force eviction down to budget
+            for i in 21..=25 {
+                cache.record_access(make_key(i), DATAPOD_SIZE, AccessType::Get);
+            }
+
+            // All 10 datapods should survive
+            for &key in &datapod_keys {
+                assert!(
+                    cache.contains(&key),
+                    "Bespoke datapod should survive eviction"
+                );
+            }
+            // At least some spam should be evicted
+            let spam_remaining = spam_keys.iter().filter(|k| cache.contains(k)).count();
+            assert!(
+                spam_remaining < 10,
+                "Spam should be evicted before datapods, remaining: {spam_remaining}"
+            );
+        }
+
+        /// §1 core problem: single-subscriber bespoke datapod survives over
+        /// uncommitted contracts with higher contribution/recency.
+        #[test]
+        fn test_datapod_single_subscriber_not_penalized() {
+            // Budget: 4 contracts
+            let budget = 4 * DATAPOD_SIZE;
+            let (mut cache, time) = make_cache(budget, Duration::from_secs(60));
+
+            // 1 bespoke datapod (committed, single subscriber)
+            let datapod = make_key(1);
+            setup_datapod(&mut cache, datapod, DATAPOD_DEPOSIT, true, true);
+
+            // 4 uncommitted contracts with high contribution + recency
+            let uncommitted: Vec<_> = (2..=5).map(|i| make_key(i)).collect();
+            for &key in &uncommitted {
+                cache.record_access(key, DATAPOD_SIZE, AccessType::Get);
+                cache.record_bytes_served(&key, 10000); // high contribution
+            }
+
+            // Advance past TTL
+            time.advance_time(Duration::from_secs(61));
+
+            // Force eviction by adding a new contract
+            let new_key = make_key(6);
+            cache.record_access(new_key, DATAPOD_SIZE, AccessType::Get);
+
+            // Datapod must survive — commitment (50%) dominates contribution (15%)
+            assert!(
+                cache.contains(&datapod),
+                "Committed datapod should survive over uncommitted high-contribution contracts"
+            );
+        }
+
+        /// §10 two tiers: Tier A (committed+identity) > Tier B (committed only) > Tier C (uncommitted).
+        #[test]
+        fn test_datapod_two_tier_eviction_ordering() {
+            // Budget: 3 contracts — adding a 4th forces eviction of the weakest
+            let budget = 3 * DATAPOD_SIZE;
+            let (mut cache, time) = make_cache(budget, Duration::from_secs(60));
+
+            let tier_c = make_key(1); // uncommitted
+            let tier_b = make_key(2); // committed only
+            let tier_a = make_key(3); // committed + identity
+
+            setup_spam(&mut cache, tier_c, DATAPOD_SIZE);
+            setup_datapod(&mut cache, tier_b, DATAPOD_DEPOSIT, false, false); // committed, no identity
+            setup_datapod(&mut cache, tier_a, DATAPOD_DEPOSIT, true, true); // committed + identity
+
+            // Advance past TTL
+            time.advance_time(Duration::from_secs(61));
+
+            // Force eviction: add one more
+            let pressure = make_key(4);
+            let result = cache.record_access(pressure, DATAPOD_SIZE, AccessType::Get);
+
+            // Tier C (uncommitted) should be evicted first
+            assert!(
+                result.evicted.contains(&tier_c),
+                "Uncommitted tier C should be evicted first"
+            );
+            assert!(cache.contains(&tier_a), "Tier A should survive");
+            assert!(cache.contains(&tier_b), "Tier B should survive");
+        }
+
+        /// §3 density normalization: small datapods reach max commitment_score
+        /// with modest deposits; large contracts need more.
+        #[test]
+        fn test_datapod_commitment_density_by_size() {
+            let config = CWPConfig::default();
+            let now = Instant::now();
+
+            // 2KB datapod with 10 XLM: density = 10 / (2048 * 0.001) = 4.88 → clamped to 1.0
+            let small = make_cwp_contract(DATAPOD_SIZE, now, 0, 0, 10, false, false);
+            let small_score = small.commitment_score(&config);
+            assert!(
+                (small_score - 1.0).abs() < 0.001,
+                "Small datapod with 10 XLM should have commitment 1.0, got {small_score}"
+            );
+
+            // 50KB contract with 10 XLM: density = 10 / (51200 * 0.001) = 0.195
+            let large = make_cwp_contract(51200, now, 0, 0, 10, false, false);
+            let large_score = large.commitment_score(&config);
+            assert!(
+                large_score < 0.25,
+                "Large contract with same deposit should have low commitment, got {large_score}"
+            );
+        }
+
+        /// §5 identity only: commitment + identity boundary scores.
+        #[test]
+        fn test_datapod_identity_without_commitment() {
+            let config = CWPConfig::default();
+            let now = Instant::now();
+
+            // Identity-only (no deposit): 0.25 * 1.0 = 0.25
+            let identity_only = make_cwp_contract(DATAPOD_SIZE, now, 0, 0, 0, true, true);
+            let id_score = identity_only.persistence_score(now, &config);
+            // Expected: 0.50*0 + 0.25*1.0 + 0.15*0 + 0.10*1.0 = 0.35
+            assert!(
+                (id_score - 0.35).abs() < 0.02,
+                "Identity-only score should be ~0.35, got {id_score}"
+            );
+
+            // Commitment-only (no identity): 0.50 * 1.0 = 0.50 + recency
+            let commit_only =
+                make_cwp_contract(DATAPOD_SIZE, now, 0, 0, DATAPOD_DEPOSIT, false, false);
+            let commit_score = commit_only.persistence_score(now, &config);
+            // Expected: 0.50*1.0 + 0.25*0 + 0.15*0 + 0.10*1.0 = 0.60
+            assert!(
+                (commit_score - 0.60).abs() < 0.02,
+                "Commitment-only score should be ~0.60, got {commit_score}"
+            );
+
+            // Both: 0.50*1.0 + 0.25*1.0 = 0.75 + recency
+            let both = make_cwp_contract(DATAPOD_SIZE, now, 0, 0, DATAPOD_DEPOSIT, true, true);
+            let both_score = both.persistence_score(now, &config);
+            // Expected: 0.50*1.0 + 0.25*1.0 + 0.15*0 + 0.10*1.0 = 0.85
+            assert!(
+                (both_score - 0.85).abs() < 0.02,
+                "Both score should be ~0.85, got {both_score}"
+            );
+        }
+
+        /// Subscriber verification updates identity score incrementally.
+        #[test]
+        fn test_datapod_subscriber_verification_updates_score() {
+            let (mut cache, _) = make_cache(10000, Duration::from_secs(60));
+            let key = make_key(1);
+
+            cache.record_access(key, DATAPOD_SIZE, AccessType::Put);
+
+            // Creator verified only
+            cache.update_identity(&key, Some([1u8; 32]), true, None, false, None);
+            let score1 = cache.get(&key).unwrap().identity_score();
+            assert!(
+                (score1 - 0.6).abs() < 0.001,
+                "Creator-only identity should be 0.6, got {score1}"
+            );
+
+            // Now also subscriber verified
+            cache.update_identity(
+                &key,
+                Some([1u8; 32]),
+                true,
+                Some([2u8; 32]),
+                true,
+                Some([2u8; 32]),
+            );
+            let score2 = cache.get(&key).unwrap().identity_score();
+            assert!(
+                (score2 - 1.0).abs() < 0.001,
+                "Both verified identity should be 1.0, got {score2}"
+            );
+
+            // Score jumped by 0.4 (subscriber component)
+            assert!(
+                (score2 - score1 - 0.4).abs() < 0.001,
+                "Subscriber verification should add 0.4, got {}",
+                score2 - score1,
+            );
+        }
+
+        /// Oracle commitment update changes persistence_score by 0.50.
+        #[test]
+        fn test_datapod_oracle_commitment_updates_score() {
+            let (mut cache, _) = make_cache(10000, Duration::from_secs(60));
+            let key = make_key(1);
+            let config = CWPConfig::default();
+            let now = cache.time_source.now();
+
+            cache.record_access(key, DATAPOD_SIZE, AccessType::Put);
+
+            // No commitment
+            cache.update_commitment(&key, 0, now);
+            let score1 = cache.get(&key).unwrap().persistence_score(now, &config);
+
+            // Add commitment
+            cache.update_commitment(&key, DATAPOD_DEPOSIT, now);
+            let score2 = cache.get(&key).unwrap().persistence_score(now, &config);
+
+            // Commitment adds 0.50 * 1.0 = 0.50
+            let delta = score2 - score1;
+            assert!(
+                (delta - 0.50).abs() < 0.02,
+                "Commitment should add ~0.50, got {delta}"
+            );
+        }
+
+        /// Full creator lifecycle: PUT → identity → commitment → serve bytes → age → spam flood → survive.
+        #[test]
+        fn test_datapod_full_lifecycle() {
+            // Budget fits datapod + 20 spam without triggering premature eviction
+            let budget = 25 * DATAPOD_SIZE;
+            let (mut cache, time) = make_cache(budget, Duration::from_secs(60));
+            let datapod = make_key(1);
+
+            // PUT 2KB datapod
+            cache.record_access(datapod, DATAPOD_SIZE, AccessType::Put);
+
+            // Identity envelope verified (creator + subscriber)
+            cache.update_identity(
+                &datapod,
+                Some([1u8; 32]),
+                true,
+                Some([2u8; 32]),
+                true,
+                Some([2u8; 32]),
+            );
+
+            // Oracle reports deposit
+            cache.update_commitment(&datapod, DATAPOD_DEPOSIT, cache.time_source.now());
+
+            // Node serves bytes
+            cache.record_bytes_served(&datapod, 5000);
+
+            // Age 3 days (recency decays)
+            time.advance_time(Duration::from_secs(3 * 86400));
+
+            // Verify score is still high despite aging
+            let config = CWPConfig::default();
+            let now = cache.time_source.now();
+            let score = cache.get(&datapod).unwrap().persistence_score(now, &config);
+            assert!(
+                score > 0.80,
+                "Fully committed datapod at 3 days should score >0.80, got {score}"
+            );
+
+            // Flood cache with 20 spam contracts (fits within budget, no eviction yet)
+            for i in 10..30 {
+                cache.record_access(make_key(i), DATAPOD_SIZE, AccessType::Get);
+            }
+            assert_eq!(cache.len(), 21); // datapod + 20 spam
+
+            // Advance past TTL so ALL contracts (datapod + spam) are eviction-eligible
+            time.advance_time(Duration::from_secs(61));
+
+            // Force eviction by adding contracts beyond budget — spam evicted first
+            for i in 30..40 {
+                cache.record_access(make_key(i), DATAPOD_SIZE, AccessType::Get);
+            }
+
+            // Datapod survives all evictions (high CWP score beats spam)
+            assert!(
+                cache.contains(&datapod),
+                "Fully committed datapod should survive spam flood"
+            );
         }
     }
 }

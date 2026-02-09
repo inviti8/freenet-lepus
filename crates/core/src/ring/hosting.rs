@@ -595,7 +595,34 @@ impl HostingManager {
             result.creator_verified,
             result.subscriber_pubkey,
             result.subscriber_verified,
+            result.recipient_pubkey,
         )
+    }
+
+    /// Update subscriber identity from subscription handshake.
+    #[cfg(feature = "lepus")]
+    pub fn update_subscriber_identity(
+        &self,
+        key: &ContractKey,
+        subscriber_pubkey: &[u8; 32],
+    ) -> bool {
+        self.hosting_cache
+            .write()
+            .update_subscriber_identity(key, subscriber_pubkey)
+    }
+
+    /// Count subscriptions for a given identity pubkey.
+    #[cfg(feature = "lepus")]
+    pub fn count_subscriptions_for_identity(&self, pubkey: &[u8; 32]) -> usize {
+        self.hosting_cache
+            .read()
+            .count_subscriptions_for_identity(pubkey)
+    }
+
+    /// Check if a subscriber identity has any funded contract.
+    #[cfg(feature = "lepus")]
+    pub fn is_identity_funded(&self, pubkey: &[u8; 32]) -> bool {
+        self.hosting_cache.read().is_identity_funded(pubkey)
     }
 
     // =========================================================================

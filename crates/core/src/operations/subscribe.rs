@@ -25,6 +25,69 @@ use tokio::time::{sleep, Duration};
 /// Used when a subscription arrives before the contract has been propagated via PUT.
 const CONTRACT_WAIT_TIMEOUT_MS: u64 = 2_000;
 
+/// Maximum subscriptions for unfunded (ghost) identities (FREENET_LEPUS.md D7).
+#[cfg(feature = "lepus")]
+const MAX_GHOST_SUBSCRIPTIONS: usize = 50;
+
+/// Stellar identity payload carried in subscription handshake (FREENET_LEPUS.md §5).
+///
+/// Proves the subscriber owns the Stellar Ed25519 key that matches
+/// the datapod's `recipient_public_key`.
+#[cfg(feature = "lepus")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct StellarIdentityPayload {
+    /// Subscriber's Ed25519 public key (32 bytes).
+    pub stellar_pubkey: [u8; 32],
+    /// Ed25519 signature over the contract instance_id bytes.
+    /// Proves ownership of the key at subscription time.
+    #[serde(with = "serde_big_array")]
+    pub signature: [u8; 64],
+}
+
+/// Serde support for [u8; 64] using hex encoding.
+#[cfg(feature = "lepus")]
+mod serde_big_array {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8; 64], ser: S) -> Result<S::Ok, S::Error> {
+        hex::encode(bytes).serialize(ser)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<[u8; 64], D::Error> {
+        let s = String::deserialize(de)?;
+        let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
+        if bytes.len() != 64 {
+            return Err(serde::de::Error::custom("expected 64 bytes"));
+        }
+        let mut arr = [0u8; 64];
+        arr.copy_from_slice(&bytes);
+        Ok(arr)
+    }
+}
+
+/// Build a Stellar identity payload for subscription handshake.
+///
+/// Reads `LEPUS_STELLAR_SECRET` env var and signs the `instance_id` to prove key ownership.
+#[cfg(feature = "lepus")]
+fn build_stellar_identity(instance_id: &ContractInstanceId) -> Option<StellarIdentityPayload> {
+    use ed25519_dalek::{Signer, SigningKey};
+
+    let secret_hex = std::env::var("LEPUS_STELLAR_SECRET").ok()?;
+    let secret_bytes = hex::decode(secret_hex.trim()).ok()?;
+    if secret_bytes.len() != 32 {
+        return None;
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&secret_bytes);
+    let signing_key = SigningKey::from_bytes(&arr);
+    let pubkey = signing_key.verifying_key().to_bytes();
+    let sig = signing_key.sign(instance_id.as_bytes());
+    Some(StellarIdentityPayload {
+        stellar_pubkey: pubkey,
+        signature: sig.to_bytes(),
+    })
+}
+
 /// Wait for a contract to become available, using channel-based notification.
 ///
 /// This handles the race condition where a subscription arrives before the contract
@@ -294,6 +357,8 @@ pub(crate) async fn request_subscribe(
         htl: op_manager.ring.max_hops_to_live,
         visited,
         is_renewal,
+        #[cfg(feature = "lepus")]
+        stellar_identity: build_stellar_identity(instance_id),
     };
 
     // Emit telemetry for subscribe request initiation
@@ -608,6 +673,8 @@ impl Operation for SubscribeOp {
                     htl,
                     visited,
                     is_renewal,
+                    #[cfg(feature = "lepus")]
+                    stellar_identity,
                 } => {
                     tracing::debug!(
                         tx = %id,
@@ -620,6 +687,53 @@ impl Operation for SubscribeOp {
 
                     // Check if we have the contract
                     if let Some(key) = super::has_contract(op_manager, *instance_id).await? {
+                        // Lepus: verify subscriber identity + enforce ghost subscription cap
+                        #[cfg(feature = "lepus")]
+                        if let Some(ref identity) = stellar_identity {
+                            // Verify signature over instance_id (proves key ownership)
+                            use ed25519_dalek::Verifier;
+                            if let Ok(vk) =
+                                ed25519_dalek::VerifyingKey::from_bytes(&identity.stellar_pubkey)
+                            {
+                                let sig = ed25519_dalek::Signature::from_bytes(&identity.signature);
+                                let msg = instance_id.as_bytes();
+                                if vk.verify(msg, &sig).is_ok() {
+                                    // Ghost subscription cap (FREENET_LEPUS.md D7)
+                                    let active_count = op_manager
+                                        .ring
+                                        .count_subscriptions_for_identity(&identity.stellar_pubkey);
+                                    let is_funded = op_manager
+                                        .ring
+                                        .is_identity_funded(&identity.stellar_pubkey);
+                                    if !is_funded && active_count >= MAX_GHOST_SUBSCRIPTIONS {
+                                        tracing::warn!(
+                                            pubkey = hex::encode(identity.stellar_pubkey),
+                                            active = active_count,
+                                            "Ghost subscription cap reached — unfunded identity \
+                                             exceeded {MAX_GHOST_SUBSCRIPTIONS} subscriptions"
+                                        );
+                                        return Ok(OperationResult {
+                                            return_msg: Some(NetMessage::from(
+                                                SubscribeMsg::Response {
+                                                    id: *id,
+                                                    instance_id: *instance_id,
+                                                    result: SubscribeMsgResult::NotFound,
+                                                },
+                                            )),
+                                            next_hop: self.requester_addr,
+                                            state: None,
+                                            stream_data: None,
+                                        });
+                                    }
+
+                                    // Valid subscriber identity — update CWP subscriber verification
+                                    op_manager
+                                        .ring
+                                        .update_subscriber_identity(&key, &identity.stellar_pubkey);
+                                }
+                            }
+                        }
+
                         // We have the contract - respond to confirm subscription
                         // State is NOT sent here - requester gets state via GET, not SUBSCRIBE
                         // In the lease-based model (2026-01), we just confirm we have the contract.
@@ -745,6 +859,23 @@ impl Operation for SubscribeOp {
                                     "Subscribe: could not find peer to register interest (after contract wait)"
                                 );
                             }
+                            // Lepus: verify subscriber identity (after contract wait path)
+                            #[cfg(feature = "lepus")]
+                            if let Some(ref identity) = stellar_identity {
+                                use ed25519_dalek::Verifier;
+                                if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(
+                                    &identity.stellar_pubkey,
+                                ) {
+                                    let sig =
+                                        ed25519_dalek::Signature::from_bytes(&identity.signature);
+                                    if vk.verify(instance_id.as_bytes(), &sig).is_ok() {
+                                        op_manager.ring.update_subscriber_identity(
+                                            &key,
+                                            &identity.stellar_pubkey,
+                                        );
+                                    }
+                                }
+                            }
                             return Ok(OperationResult {
                                 return_msg: Some(NetMessage::from(SubscribeMsg::Response {
                                     id: *id,
@@ -820,6 +951,8 @@ impl Operation for SubscribeOp {
                             htl: htl.saturating_sub(1),
                             visited: new_visited,
                             is_renewal: *is_renewal,
+                            #[cfg(feature = "lepus")]
+                            stellar_identity: stellar_identity.clone(),
                         })),
                         next_hop: Some(next_addr),
                         state: Some(OpEnum::Subscribe(SubscribeOp {
@@ -1161,6 +1294,9 @@ mod messages {
             /// Whether this is a renewal (requester already has contract state).
             /// If true, responder skips sending state to save bandwidth.
             is_renewal: bool,
+            /// Optional Stellar identity proving subscriber key ownership (Lepus §5).
+            #[cfg(feature = "lepus")]
+            stellar_identity: Option<super::StellarIdentityPayload>,
         },
         /// Response for a SUBSCRIBE operation. Routed hop-by-hop back to originator.
         /// Uses instance_id for routing (always available from the request).

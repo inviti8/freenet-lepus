@@ -990,6 +990,30 @@ impl Ring {
             .verify_and_update_identity(key, state_bytes)
     }
 
+    /// Update subscriber identity from subscription handshake.
+    #[cfg(feature = "lepus")]
+    pub fn update_subscriber_identity(
+        &self,
+        key: &ContractKey,
+        subscriber_pubkey: &[u8; 32],
+    ) -> bool {
+        self.hosting_manager
+            .update_subscriber_identity(key, subscriber_pubkey)
+    }
+
+    /// Count subscriptions for a given identity pubkey.
+    #[cfg(feature = "lepus")]
+    pub fn count_subscriptions_for_identity(&self, pubkey: &[u8; 32]) -> usize {
+        self.hosting_manager
+            .count_subscriptions_for_identity(pubkey)
+    }
+
+    /// Check if a subscriber identity has any funded contract.
+    #[cfg(feature = "lepus")]
+    pub fn is_identity_funded(&self, pubkey: &[u8; 32]) -> bool {
+        self.hosting_manager.is_identity_funded(pubkey)
+    }
+
     // ==================== Hosting Cache Management ====================
 
     /// Touch a contract in the hosting cache (refresh TTL without adding).
