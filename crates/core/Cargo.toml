@@ -78,6 +78,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 x25519-dalek = { workspace = true }
 sha2 = "0.10"
 ordered-float = { version = "4", optional = true }
+ed25519-dalek = { version = "2", optional = true, features = ["std"] }
 
 # Tracing deps
 opentelemetry = "0.31"
@@ -178,7 +179,7 @@ bench_full = []  # Enables full benchmark suite (slow, ~78 min)
 simulation_tests = []
 # Feature to enable nightly-only tests (long-running, resource-intensive)
 nightly_tests = []
-lepus = ["ordered-float"]
+lepus = ["ordered-float", "ed25519-dalek"]
 
 # ==============================================================================
 # Lint Configuration

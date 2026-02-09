@@ -983,6 +983,13 @@ impl Ring {
             .update_commitments_batch(updates, check_time)
     }
 
+    /// Verify identity envelope in contract state and update the hosting cache.
+    #[cfg(feature = "lepus")]
+    pub fn verify_and_update_identity(&self, key: &ContractKey, state_bytes: &[u8]) -> bool {
+        self.hosting_manager
+            .verify_and_update_identity(key, state_bytes)
+    }
+
     // ==================== Hosting Cache Management ====================
 
     /// Touch a contract in the hosting cache (refresh TTL without adding).

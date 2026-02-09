@@ -679,6 +679,30 @@ impl<T: TimeSource> HostingCache<T> {
         self.contracts.keys().cloned().collect()
     }
 
+    /// Update the identity verification state for a hosted contract.
+    ///
+    /// Sets creator and subscriber identity fields on the contract's
+    /// `IdentityState`. Returns `true` if the key was found.
+    #[cfg(feature = "lepus")]
+    pub fn update_identity(
+        &mut self,
+        key: &ContractKey,
+        creator_pubkey: Option<[u8; 32]>,
+        creator_verified: bool,
+        subscriber_pubkey: Option<[u8; 32]>,
+        subscriber_verified: bool,
+    ) -> bool {
+        if let Some(contract) = self.contracts.get_mut(key) {
+            contract.identity.creator_pubkey = creator_pubkey;
+            contract.identity.creator_verified = creator_verified;
+            contract.identity.subscriber_pubkey = subscriber_pubkey;
+            contract.identity.subscriber_verified = subscriber_verified;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Update the commitment deposit for a hosted contract.
     ///
     /// Sets `deposited_xlm` and `last_oracle_check` on the contract's

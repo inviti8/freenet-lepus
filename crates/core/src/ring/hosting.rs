@@ -29,6 +29,8 @@
 
 mod cache;
 #[cfg(feature = "lepus")]
+pub(crate) mod identity;
+#[cfg(feature = "lepus")]
 pub(crate) mod oracle;
 
 use crate::util::backoff::{ExponentialBackoff, TrackedBackoff};
@@ -577,6 +579,23 @@ impl HostingManager {
             }
         }
         count
+    }
+
+    /// Verify identity envelope in contract state and update the hosting cache.
+    ///
+    /// Parses the Lepus identity envelope from `state_bytes`, verifies the creator
+    /// signature, checks subscriber matching, and stores results on the hosted contract.
+    /// Returns `true` if the contract was found in cache and updated.
+    #[cfg(feature = "lepus")]
+    pub fn verify_and_update_identity(&self, key: &ContractKey, state_bytes: &[u8]) -> bool {
+        let result = identity::verify_identity(state_bytes);
+        self.hosting_cache.write().update_identity(
+            key,
+            result.creator_pubkey,
+            result.creator_verified,
+            result.subscriber_pubkey,
+            result.subscriber_verified,
+        )
     }
 
     // =========================================================================

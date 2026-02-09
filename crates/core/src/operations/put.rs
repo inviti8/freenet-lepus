@@ -364,6 +364,14 @@ impl Operation for PutOp {
                         "PUT Request: contract {key} must be in seed list after put_contract + seed_contract"
                     );
 
+                    // Lepus: verify identity envelope and update hosting cache
+                    #[cfg(feature = "lepus")]
+                    {
+                        op_manager
+                            .ring
+                            .verify_and_update_identity(&key, value.as_ref());
+                    }
+
                     // Network peer notification is now automatic via BroadcastStateChange
                     // event emitted by the executor when state changes. No manual triggering needed.
 
@@ -896,6 +904,14 @@ impl Operation for PutOp {
                         op_manager.ring.is_seeding_contract(&key),
                         "PUT Streaming: contract {key} must be in seed list after put_contract + seed_contract"
                     );
+
+                    // Lepus: verify identity envelope and update hosting cache
+                    #[cfg(feature = "lepus")]
+                    {
+                        op_manager
+                            .ring
+                            .verify_and_update_identity(&key, value.as_ref());
+                    }
 
                     // Step 5: Handle forwarding or final destination
                     if piping_started {
