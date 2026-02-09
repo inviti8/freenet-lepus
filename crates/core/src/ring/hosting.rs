@@ -536,6 +536,22 @@ impl HostingManager {
     }
 
     // =========================================================================
+    // CWP Contribution Tracking (Lepus)
+    // =========================================================================
+
+    /// Record bytes served to other peers for a contract.
+    #[cfg(feature = "lepus")]
+    pub fn record_bytes_served(&self, key: &ContractKey, bytes: u64) {
+        self.hosting_cache.write().record_bytes_served(key, bytes);
+    }
+
+    /// Record bytes consumed (received) from other peers for a contract.
+    #[cfg(feature = "lepus")]
+    pub fn record_bytes_consumed(&self, key: &ContractKey, bytes: u64) {
+        self.hosting_cache.write().record_bytes_consumed(key, bytes);
+    }
+
+    // =========================================================================
     // Subscription Retry Management (Backoff)
     // =========================================================================
 

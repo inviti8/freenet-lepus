@@ -1988,6 +1988,7 @@ dependencies = [
  "opentelemetry-jaeger",
  "opentelemetry-otlp",
  "opentelemetry_sdk 0.31.0",
+ "ordered-float 4.6.0",
  "parking_lot",
  "pav_regression",
  "pin-project",

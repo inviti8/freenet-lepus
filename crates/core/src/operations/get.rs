@@ -963,6 +963,12 @@ impl Operation for GetOp {
                                 "GET: contract found locally"
                             );
 
+                            // CWP: record bytes served to requester
+                            #[cfg(feature = "lepus")]
+                            op_manager
+                                .ring
+                                .record_bytes_served(&key, state.size() as u64);
+
                             // Register the GET requester's interest in this contract so that
                             // update broadcasts include them as a target. This is critical for
                             // partitioned topologies: the requester's auto-subscribe may route
@@ -1686,6 +1692,12 @@ impl Operation for GetOp {
                             // TOCTOU race that existed when checking is_hosting_contract() first.
                             let access_result =
                                 op_manager.ring.record_get_access(key, value.size() as u64);
+
+                            // CWP: record bytes consumed from remote peer
+                            #[cfg(feature = "lepus")]
+                            op_manager
+                                .ring
+                                .record_bytes_consumed(&key, value.size() as u64);
 
                             // Clean up interest tracking for evicted contracts (always, even if already hosting)
                             let mut removed_contracts = Vec::new();

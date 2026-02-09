@@ -467,6 +467,12 @@ impl Operation for UpdateOp {
                     };
                     let state_for_telemetry = WrappedState::from(payload_bytes.clone());
 
+                    // CWP: record bytes consumed from broadcast
+                    #[cfg(feature = "lepus")]
+                    op_manager
+                        .ring
+                        .record_bytes_consumed(key, state_for_telemetry.size() as u64);
+
                     // Emit telemetry: broadcast received from upstream peer
                     if let Some(requester_pkl) = op_manager
                         .ring
@@ -907,6 +913,12 @@ impl Operation for UpdateOp {
 
                     // For telemetry
                     let state_for_telemetry = WrappedState::from(state_bytes.clone());
+
+                    // CWP: record bytes consumed from streaming broadcast
+                    #[cfg(feature = "lepus")]
+                    op_manager
+                        .ring
+                        .record_bytes_consumed(key, state_for_telemetry.size() as u64);
 
                     // Emit telemetry: broadcast received from upstream peer
                     if let Some(requester_pkl) = op_manager

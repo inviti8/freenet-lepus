@@ -18,6 +18,9 @@ use tokio::time::Instant;
 
 use crate::util::time_source::TimeSource;
 
+#[cfg(feature = "lepus")]
+use ordered_float::OrderedFloat;
+
 /// Default hosting cache budget: 100MB
 pub const DEFAULT_HOSTING_BUDGET_BYTES: u64 = 100 * 1024 * 1024;
 
@@ -30,6 +33,76 @@ pub const TTL_RENEWAL_MULTIPLIER: u32 = 4;
 pub const DEFAULT_MIN_TTL: Duration = Duration::from_secs(
     super::SUBSCRIPTION_RENEWAL_INTERVAL.as_secs() * TTL_RENEWAL_MULTIPLIER as u64,
 );
+
+// =============================================================================
+// CWP (Commitment-Weighted Persistence) — Lepus Feature
+// =============================================================================
+
+/// Scoring weights and normalization targets for CWP eviction.
+///
+/// CWP replaces LRU eviction with a weighted persistence score:
+///   score = w_c * commitment + w_i * identity + w_n * contribution + w_r * recency
+///
+/// Higher scores survive eviction longer.
+#[cfg(feature = "lepus")]
+#[derive(Debug, Clone)]
+pub struct CWPConfig {
+    /// Weight for commitment (Soroban deposit) factor.
+    pub commitment_weight: f64,
+    /// Weight for identity verification factor.
+    pub identity_weight: f64,
+    /// Weight for network contribution (bytes served / consumed) factor.
+    pub contribution_weight: f64,
+    /// Weight for recency of last access.
+    pub recency_weight: f64,
+    /// Target XLM density: deposited_xlm / size_bytes at which commitment saturates.
+    pub commitment_density_target: f64,
+    /// Target contribution ratio at which contribution score saturates.
+    pub contribution_target: f64,
+    /// Half-life in seconds for recency decay. Score = 0.5 after this many seconds.
+    pub recency_halflife_secs: f64,
+}
+
+#[cfg(feature = "lepus")]
+impl Default for CWPConfig {
+    fn default() -> Self {
+        Self {
+            commitment_weight: 0.50,
+            identity_weight: 0.25,
+            contribution_weight: 0.15,
+            recency_weight: 0.10,
+            commitment_density_target: 0.001,
+            contribution_target: 1.5,
+            recency_halflife_secs: 604_800.0, // 7 days
+        }
+    }
+}
+
+/// Placeholder for Soroban commitment state (Phase 2).
+#[cfg(feature = "lepus")]
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)] // Phase 2 placeholder — fields populated by Oracle
+pub struct CommitmentState {
+    /// Deposited XLM (in stroops or smallest unit).
+    pub deposited_xlm: u64,
+    /// Last time the Oracle verified this deposit.
+    pub last_oracle_check: Option<Instant>,
+}
+
+/// Placeholder for identity verification state (Phase 3).
+#[cfg(feature = "lepus")]
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)] // Phase 3 placeholder — fields populated by identity verifier
+pub struct IdentityState {
+    /// Creator's Ed25519 public key, if known.
+    pub creator_pubkey: Option<[u8; 32]>,
+    /// Whether the creator identity has been verified.
+    pub creator_verified: bool,
+    /// Subscriber's Ed25519 public key, if known.
+    pub subscriber_pubkey: Option<[u8; 32]>,
+    /// Whether the subscriber identity has been verified.
+    pub subscriber_verified: bool,
+}
 
 /// Type of access that adds/refreshes a contract in the hosting cache.
 ///
@@ -67,6 +140,86 @@ pub struct HostedContract {
     pub last_accessed: Instant,
     /// Type of the last access
     pub access_type: AccessType,
+    /// Soroban commitment state (Phase 2 placeholder).
+    #[cfg(feature = "lepus")]
+    pub commitment: CommitmentState,
+    /// Identity verification state (Phase 3 placeholder).
+    #[cfg(feature = "lepus")]
+    pub identity: IdentityState,
+    /// Total bytes served to other peers for this contract.
+    #[cfg(feature = "lepus")]
+    pub bytes_served: u64,
+    /// Total bytes consumed (received) from other peers for this contract.
+    #[cfg(feature = "lepus")]
+    pub bytes_consumed: u64,
+}
+
+#[cfg(feature = "lepus")]
+impl HostedContract {
+    /// Compute the CWP persistence score for this contract.
+    ///
+    /// Higher scores indicate higher priority to keep in cache.
+    /// Score is in [0.0, 1.0] — a weighted sum of four sub-scores.
+    pub fn persistence_score(&self, now: Instant, config: &CWPConfig) -> f64 {
+        let c = self.commitment_score(config);
+        let i = self.identity_score();
+        let n = self.contribution_score(config);
+        let r = self.recency_score(now, config);
+
+        let score = config.commitment_weight * c
+            + config.identity_weight * i
+            + config.contribution_weight * n
+            + config.recency_weight * r;
+
+        score.clamp(0.0, 1.0)
+    }
+
+    /// Commitment sub-score: `min(1.0, deposited_xlm / (size_bytes * density_target))`.
+    ///
+    /// Returns 0.0 when no deposit exists (Phase 1 default).
+    pub fn commitment_score(&self, config: &CWPConfig) -> f64 {
+        let denominator = self.size_bytes as f64 * config.commitment_density_target;
+        if denominator <= 0.0 {
+            return 0.0;
+        }
+        (self.commitment.deposited_xlm as f64 / denominator).min(1.0)
+    }
+
+    /// Identity sub-score: `(creator_verified * 0.6) + (subscriber_verified * 0.4)`.
+    ///
+    /// Returns 0.0 when no identity is verified (Phase 1 default).
+    pub fn identity_score(&self) -> f64 {
+        let creator = if self.identity.creator_verified {
+            0.6
+        } else {
+            0.0
+        };
+        let subscriber = if self.identity.subscriber_verified {
+            0.4
+        } else {
+            0.0
+        };
+        creator + subscriber
+    }
+
+    /// Contribution sub-score: `min(1.0, (bytes_served / max(bytes_consumed, 1)) / target)`.
+    ///
+    /// Rewards contracts that serve more data than they consume.
+    pub fn contribution_score(&self, config: &CWPConfig) -> f64 {
+        let consumed = self.bytes_consumed.max(1) as f64;
+        let ratio = self.bytes_served as f64 / consumed;
+        (ratio / config.contribution_target).min(1.0)
+    }
+
+    /// Recency sub-score: `1.0 / (1.0 + elapsed_secs / halflife_secs)`.
+    ///
+    /// Exponential-ish decay: returns 1.0 for just-accessed, 0.5 at halflife.
+    pub fn recency_score(&self, now: Instant, config: &CWPConfig) -> f64 {
+        let elapsed = now
+            .saturating_duration_since(self.last_accessed)
+            .as_secs_f64();
+        1.0 / (1.0 + elapsed / config.recency_halflife_secs)
+    }
 }
 
 /// Unified hosting cache that combines byte-budget LRU with TTL protection.
@@ -94,6 +247,9 @@ pub struct HostingCache<T: TimeSource> {
     contracts: HashMap<ContractKey, HostedContract>,
     /// Time source for testability
     time_source: T,
+    /// CWP scoring configuration (Lepus only).
+    #[cfg(feature = "lepus")]
+    cwp_config: CWPConfig,
 }
 
 impl<T: TimeSource> HostingCache<T> {
@@ -106,6 +262,28 @@ impl<T: TimeSource> HostingCache<T> {
             lru_order: VecDeque::new(),
             contracts: HashMap::new(),
             time_source,
+            #[cfg(feature = "lepus")]
+            cwp_config: CWPConfig::default(),
+        }
+    }
+
+    /// Create a new hosting cache with explicit CWP configuration.
+    #[cfg(feature = "lepus")]
+    #[allow(dead_code)] // Public API for custom CWP config
+    pub fn new_with_cwp(
+        budget_bytes: u64,
+        min_ttl: Duration,
+        time_source: T,
+        cwp_config: CWPConfig,
+    ) -> Self {
+        Self {
+            budget_bytes,
+            current_bytes: 0,
+            min_ttl,
+            lru_order: VecDeque::new(),
+            contracts: HashMap::new(),
+            time_source,
+            cwp_config,
         }
     }
 
@@ -152,29 +330,52 @@ impl<T: TimeSource> HostingCache<T> {
         } else {
             // Not cached - need to add it
             // First, evict until we have room (respecting TTL)
-            while self.current_bytes + size_bytes > self.budget_bytes && !self.lru_order.is_empty()
+            #[cfg(not(feature = "lepus"))]
             {
-                if let Some(oldest_key) = self.lru_order.front().cloned() {
-                    if let Some(oldest) = self.contracts.get(&oldest_key) {
-                        let age = now.saturating_duration_since(oldest.last_accessed);
-                        if age >= self.min_ttl {
-                            // Entry is past TTL, safe to evict
-                            if let Some(removed) = self.contracts.remove(&oldest_key) {
-                                self.current_bytes =
-                                    self.current_bytes.saturating_sub(removed.size_bytes);
-                                self.lru_order.pop_front();
-                                evicted.push(oldest_key);
+                while self.current_bytes + size_bytes > self.budget_bytes
+                    && !self.lru_order.is_empty()
+                {
+                    if let Some(oldest_key) = self.lru_order.front().cloned() {
+                        if let Some(oldest) = self.contracts.get(&oldest_key) {
+                            let age = now.saturating_duration_since(oldest.last_accessed);
+                            if age >= self.min_ttl {
+                                if let Some(removed) = self.contracts.remove(&oldest_key) {
+                                    self.current_bytes =
+                                        self.current_bytes.saturating_sub(removed.size_bytes);
+                                    self.lru_order.pop_front();
+                                    evicted.push(oldest_key);
+                                }
+                            } else {
+                                break;
                             }
                         } else {
-                            // Oldest entry still within TTL - allow exceeding budget
-                            break;
+                            self.lru_order.pop_front();
                         }
                     } else {
-                        // Entry in LRU but not in map - clean up
-                        self.lru_order.pop_front();
+                        break;
                     }
-                } else {
-                    break;
+                }
+            }
+
+            // CWP eviction: evict the contract with the lowest persistence score
+            // among those past min_ttl. O(n) scan — acceptable for ~50K contracts.
+            #[cfg(feature = "lepus")]
+            {
+                while self.current_bytes + size_bytes > self.budget_bytes
+                    && !self.contracts.is_empty()
+                {
+                    let victim = self.find_lowest_score_victim(now);
+                    if let Some(victim_key) = victim {
+                        if let Some(removed) = self.contracts.remove(&victim_key) {
+                            self.current_bytes =
+                                self.current_bytes.saturating_sub(removed.size_bytes);
+                            self.lru_order.retain(|k| k != &victim_key);
+                            evicted.push(victim_key);
+                        }
+                    } else {
+                        // All remaining contracts are within TTL — allow exceeding budget
+                        break;
+                    }
                 }
             }
 
@@ -183,6 +384,14 @@ impl<T: TimeSource> HostingCache<T> {
                 size_bytes,
                 last_accessed: now,
                 access_type,
+                #[cfg(feature = "lepus")]
+                commitment: CommitmentState::default(),
+                #[cfg(feature = "lepus")]
+                identity: IdentityState::default(),
+                #[cfg(feature = "lepus")]
+                bytes_served: 0,
+                #[cfg(feature = "lepus")]
+                bytes_consumed: 0,
             };
             self.contracts.insert(key, contract);
             self.lru_order.push_back(key);
@@ -267,45 +476,115 @@ impl<T: TimeSource> HostingCache<T> {
     {
         let now = self.time_source.now();
         let mut evicted = Vec::new();
-        let mut skipped_keys = Vec::new();
 
-        // Only sweep if we're over budget
-        while self.current_bytes > self.budget_bytes && !self.lru_order.is_empty() {
-            if let Some(oldest_key) = self.lru_order.front().cloned() {
-                if let Some(oldest) = self.contracts.get(&oldest_key) {
-                    let age = now.saturating_duration_since(oldest.last_accessed);
-                    if age >= self.min_ttl {
-                        // Check if caller wants to retain this contract
-                        if should_retain(&oldest_key) {
-                            // Move to back of LRU (treat as recently accessed)
-                            self.lru_order.pop_front();
-                            skipped_keys.push(oldest_key);
-                            continue;
-                        }
-                        if let Some(removed) = self.contracts.remove(&oldest_key) {
-                            self.current_bytes =
-                                self.current_bytes.saturating_sub(removed.size_bytes);
-                            self.lru_order.pop_front();
-                            evicted.push(oldest_key);
+        #[cfg(not(feature = "lepus"))]
+        {
+            let mut skipped_keys = Vec::new();
+
+            while self.current_bytes > self.budget_bytes && !self.lru_order.is_empty() {
+                if let Some(oldest_key) = self.lru_order.front().cloned() {
+                    if let Some(oldest) = self.contracts.get(&oldest_key) {
+                        let age = now.saturating_duration_since(oldest.last_accessed);
+                        if age >= self.min_ttl {
+                            if should_retain(&oldest_key) {
+                                self.lru_order.pop_front();
+                                skipped_keys.push(oldest_key);
+                                continue;
+                            }
+                            if let Some(removed) = self.contracts.remove(&oldest_key) {
+                                self.current_bytes =
+                                    self.current_bytes.saturating_sub(removed.size_bytes);
+                                self.lru_order.pop_front();
+                                evicted.push(oldest_key);
+                            }
+                        } else {
+                            break;
                         }
                     } else {
-                        // Can't evict more - all remaining are within TTL
-                        break;
+                        self.lru_order.pop_front();
                     }
                 } else {
-                    self.lru_order.pop_front();
+                    break;
                 }
-            } else {
-                break;
+            }
+
+            for key in skipped_keys {
+                self.lru_order.push_back(key);
             }
         }
 
-        // Re-add skipped keys to back of LRU order
-        for key in skipped_keys {
-            self.lru_order.push_back(key);
+        // CWP sweep: find lowest-scoring contract past min_ttl, respecting should_retain
+        #[cfg(feature = "lepus")]
+        {
+            while self.current_bytes > self.budget_bytes && !self.contracts.is_empty() {
+                let victim = self.find_lowest_score_victim_with_retain(now, &should_retain);
+                if let Some(victim_key) = victim {
+                    if let Some(removed) = self.contracts.remove(&victim_key) {
+                        self.current_bytes = self.current_bytes.saturating_sub(removed.size_bytes);
+                        self.lru_order.retain(|k| k != &victim_key);
+                        evicted.push(victim_key);
+                    }
+                } else {
+                    // All remaining are within TTL or retained
+                    break;
+                }
+            }
         }
 
         evicted
+    }
+
+    /// Find the contract with the lowest CWP persistence score that is eligible
+    /// for eviction (past min_ttl).
+    ///
+    /// Tie-breaking: lowest score → oldest last_accessed → smallest key bytes.
+    #[cfg(feature = "lepus")]
+    fn find_lowest_score_victim(&self, now: Instant) -> Option<ContractKey> {
+        self.find_lowest_score_victim_with_retain(now, &|_| false)
+    }
+
+    /// Find the contract with the lowest CWP persistence score that is eligible
+    /// for eviction (past min_ttl), respecting a should_retain predicate.
+    #[cfg(feature = "lepus")]
+    fn find_lowest_score_victim_with_retain(
+        &self,
+        now: Instant,
+        should_retain: &dyn Fn(&ContractKey) -> bool,
+    ) -> Option<ContractKey> {
+        let mut best: Option<(OrderedFloat<f64>, Instant, ContractKey)> = None;
+
+        for (key, contract) in &self.contracts {
+            let age = now.saturating_duration_since(contract.last_accessed);
+            if age < self.min_ttl {
+                continue; // Protected by TTL
+            }
+            if should_retain(key) {
+                continue; // Caller wants to keep this one
+            }
+
+            let score = OrderedFloat(contract.persistence_score(now, &self.cwp_config));
+            let candidate = (score, contract.last_accessed, *key);
+
+            let dominated = match &best {
+                None => true,
+                Some(current_best) => {
+                    // Lower score is worse (evict first). On tie: older is worse.
+                    // On tie again: compare key bytes for determinism.
+                    candidate.0 < current_best.0
+                        || (candidate.0 == current_best.0
+                            && (candidate.1 < current_best.1
+                                || (candidate.1 == current_best.1
+                                    && candidate.2.id().as_bytes()
+                                        < current_best.2.id().as_bytes())))
+                }
+            };
+
+            if dominated {
+                best = Some(candidate);
+            }
+        }
+
+        best.map(|(_, _, key)| key)
     }
 
     /// Load a contract entry from persisted data during startup.
@@ -338,6 +617,14 @@ impl<T: TimeSource> HostingCache<T> {
             size_bytes,
             last_accessed,
             access_type,
+            #[cfg(feature = "lepus")]
+            commitment: CommitmentState::default(),
+            #[cfg(feature = "lepus")]
+            identity: IdentityState::default(),
+            #[cfg(feature = "lepus")]
+            bytes_served: 0,
+            #[cfg(feature = "lepus")]
+            bytes_consumed: 0,
         };
 
         self.contracts.insert(key, contract);
@@ -361,6 +648,29 @@ impl<T: TimeSource> HostingCache<T> {
         for (key, _) in entries {
             self.lru_order.push_back(key);
         }
+    }
+
+    /// Record bytes served (sent to other peers) for a hosted contract.
+    #[cfg(feature = "lepus")]
+    pub fn record_bytes_served(&mut self, key: &ContractKey, bytes: u64) {
+        if let Some(contract) = self.contracts.get_mut(key) {
+            contract.bytes_served = contract.bytes_served.saturating_add(bytes);
+        }
+    }
+
+    /// Record bytes consumed (received from other peers) for a hosted contract.
+    #[cfg(feature = "lepus")]
+    pub fn record_bytes_consumed(&mut self, key: &ContractKey, bytes: u64) {
+        if let Some(contract) = self.contracts.get_mut(key) {
+            contract.bytes_consumed = contract.bytes_consumed.saturating_add(bytes);
+        }
+    }
+
+    /// Get a mutable reference to a hosted contract's metadata.
+    #[cfg(feature = "lepus")]
+    #[allow(dead_code)] // Public API for future Oracle/identity integration
+    pub fn get_mut(&mut self, key: &ContractKey) -> Option<&mut HostedContract> {
+        self.contracts.get_mut(key)
     }
 }
 
@@ -689,5 +999,265 @@ mod tests {
         cache.record_access(key, 150, AccessType::Put);
         assert_eq!(cache.current_bytes(), 150);
         assert_eq!(cache.get(&key).unwrap().size_bytes, 150);
+    }
+
+    // =========================================================================
+    // CWP (Lepus) Tests
+    // =========================================================================
+
+    #[cfg(feature = "lepus")]
+    mod cwp_tests {
+        use super::*;
+
+        fn make_cwp_contract(
+            size_bytes: u64,
+            last_accessed: Instant,
+            bytes_served: u64,
+            bytes_consumed: u64,
+            deposited_xlm: u64,
+            creator_verified: bool,
+            subscriber_verified: bool,
+        ) -> HostedContract {
+            HostedContract {
+                size_bytes,
+                last_accessed,
+                access_type: AccessType::Get,
+                commitment: CommitmentState {
+                    deposited_xlm,
+                    last_oracle_check: None,
+                },
+                identity: IdentityState {
+                    creator_pubkey: None,
+                    creator_verified,
+                    subscriber_pubkey: None,
+                    subscriber_verified,
+                },
+                bytes_served,
+                bytes_consumed,
+            }
+        }
+
+        #[test]
+        fn test_recency_score_halflife() {
+            let config = CWPConfig::default();
+            let now = Instant::now();
+            let halflife = Duration::from_secs_f64(config.recency_halflife_secs);
+            let contract = make_cwp_contract(1000, now - halflife, 0, 0, 0, false, false);
+
+            let score = contract.recency_score(now, &config);
+            // After exactly one half-life, score should be ~0.5
+            assert!((score - 0.5).abs() < 0.01, "Expected ~0.5, got {}", score);
+        }
+
+        #[test]
+        fn test_recency_score_fresh() {
+            let config = CWPConfig::default();
+            let now = Instant::now();
+            let contract = make_cwp_contract(1000, now, 0, 0, 0, false, false);
+
+            let score = contract.recency_score(now, &config);
+            assert!(
+                (score - 1.0).abs() < 0.001,
+                "Just-accessed should be ~1.0, got {}",
+                score
+            );
+        }
+
+        #[test]
+        fn test_contribution_score_zero_consumed() {
+            let config = CWPConfig::default();
+            // bytes_consumed = 0 should not panic (max(0, 1) = 1)
+            let contract = make_cwp_contract(1000, Instant::now(), 100, 0, 0, false, false);
+            let score = contract.contribution_score(&config);
+            // 100 / 1 / 1.5 = 66.67, clamped to 1.0
+            assert!(
+                (score - 1.0).abs() < 0.001,
+                "High ratio should clamp to 1.0, got {}",
+                score
+            );
+        }
+
+        #[test]
+        fn test_contribution_score_exceeds_target() {
+            let config = CWPConfig::default();
+            let contract = make_cwp_contract(1000, Instant::now(), 3000, 1000, 0, false, false);
+            let score = contract.contribution_score(&config);
+            // ratio = 3.0, target = 1.5, 3.0/1.5 = 2.0 → clamped to 1.0
+            assert!(
+                (score - 1.0).abs() < 0.001,
+                "Exceeding target should clamp to 1.0, got {}",
+                score
+            );
+        }
+
+        #[test]
+        fn test_commitment_score_zero_deposit() {
+            let config = CWPConfig::default();
+            let contract = make_cwp_contract(1000, Instant::now(), 0, 0, 0, false, false);
+            let score = contract.commitment_score(&config);
+            assert!(
+                score.abs() < 0.001,
+                "Zero deposit should give 0.0, got {}",
+                score
+            );
+        }
+
+        #[test]
+        fn test_identity_score_both_verified() {
+            let contract = make_cwp_contract(1000, Instant::now(), 0, 0, 0, true, true);
+            let score = contract.identity_score();
+            assert!(
+                (score - 1.0).abs() < 0.001,
+                "Both verified should give 1.0, got {}",
+                score
+            );
+        }
+
+        #[test]
+        fn test_identity_score_none_verified() {
+            let contract = make_cwp_contract(1000, Instant::now(), 0, 0, 0, false, false);
+            let score = contract.identity_score();
+            assert!(
+                score.abs() < 0.001,
+                "None verified should give 0.0, got {}",
+                score
+            );
+        }
+
+        #[test]
+        fn test_persistence_score_weighted_sum() {
+            let config = CWPConfig::default();
+            let now = Instant::now();
+            // All factors at 0 except recency (just accessed → ~1.0)
+            let contract = make_cwp_contract(1000, now, 0, 0, 0, false, false);
+            let score = contract.persistence_score(now, &config);
+
+            // Expected: 0.50*0 + 0.25*0 + 0.15*0 + 0.10*1.0 = 0.10
+            assert!(
+                (score - 0.10).abs() < 0.01,
+                "Only recency should contribute, got {}",
+                score
+            );
+        }
+
+        #[test]
+        fn test_cwp_eviction_lowest_score_evicted() {
+            let (mut cache, time) = make_cache(200, Duration::from_secs(60));
+            let key1 = make_key(1);
+            let key2 = make_key(2);
+            let key3 = make_key(3);
+
+            // Add two contracts
+            cache.record_access(key1, 100, AccessType::Get);
+            cache.record_access(key2, 100, AccessType::Get);
+
+            // Give key2 higher contribution score
+            cache.record_bytes_served(&key2, 10000);
+
+            // Advance past TTL
+            time.advance_time(Duration::from_secs(61));
+
+            // Add key3 — should evict key1 (lower score: no contribution)
+            let result = cache.record_access(key3, 100, AccessType::Get);
+            assert!(result.is_new);
+            assert_eq!(result.evicted, vec![key1]);
+            assert!(!cache.contains(&key1));
+            assert!(cache.contains(&key2));
+            assert!(cache.contains(&key3));
+        }
+
+        #[test]
+        fn test_cwp_eviction_respects_min_ttl() {
+            let (mut cache, time) = make_cache(200, Duration::from_secs(60));
+            let key1 = make_key(1);
+            let key2 = make_key(2);
+            let key3 = make_key(3);
+
+            cache.record_access(key1, 100, AccessType::Get);
+            cache.record_access(key2, 100, AccessType::Get);
+
+            // Advance only 30s (under TTL)
+            time.advance_time(Duration::from_secs(30));
+
+            // Add key3 — should NOT evict (all under TTL)
+            let result = cache.record_access(key3, 100, AccessType::Get);
+            assert!(result.evicted.is_empty());
+            assert_eq!(cache.len(), 3);
+        }
+
+        #[test]
+        fn test_cwp_equal_scores_approximates_lru() {
+            // When all CWP factors are default (0), recency dominates.
+            // Oldest should be evicted first.
+            let (mut cache, time) = make_cache(200, Duration::from_secs(60));
+            let key1 = make_key(1);
+            let key2 = make_key(2);
+            let key3 = make_key(3);
+
+            cache.record_access(key1, 100, AccessType::Get);
+            time.advance_time(Duration::from_secs(1));
+            cache.record_access(key2, 100, AccessType::Get);
+
+            // Both past TTL
+            time.advance_time(Duration::from_secs(61));
+
+            // key1 is older → lower recency score → evicted first
+            let result = cache.record_access(key3, 100, AccessType::Get);
+            assert_eq!(result.evicted, vec![key1]);
+        }
+
+        #[test]
+        fn test_record_bytes_served_updates_contribution() {
+            let (mut cache, _) = make_cache(1000, Duration::from_secs(60));
+            let key = make_key(1);
+
+            cache.record_access(key, 100, AccessType::Get);
+            cache.record_bytes_served(&key, 500);
+            cache.record_bytes_served(&key, 300);
+
+            let contract = cache.get(&key).unwrap();
+            assert_eq!(contract.bytes_served, 800);
+        }
+
+        #[test]
+        fn test_record_bytes_consumed_updates() {
+            let (mut cache, _) = make_cache(1000, Duration::from_secs(60));
+            let key = make_key(1);
+
+            cache.record_access(key, 100, AccessType::Get);
+            cache.record_bytes_consumed(&key, 200);
+            cache.record_bytes_consumed(&key, 100);
+
+            let contract = cache.get(&key).unwrap();
+            assert_eq!(contract.bytes_consumed, 300);
+        }
+
+        #[test]
+        fn test_contribution_affects_eviction_order() {
+            let (mut cache, time) = make_cache(300, Duration::from_secs(60));
+            let key1 = make_key(1); // no contribution
+            let key2 = make_key(2); // high contribution
+            let key3 = make_key(3); // no contribution
+
+            cache.record_access(key1, 100, AccessType::Get);
+            cache.record_access(key2, 100, AccessType::Get);
+            cache.record_access(key3, 100, AccessType::Get);
+
+            // Give key2 significant contribution
+            cache.record_bytes_served(&key2, 5000);
+
+            // Advance past TTL
+            time.advance_time(Duration::from_secs(61));
+
+            // Need to evict to add key4 - should evict key1 or key3 (lowest scores), not key2
+            let key4 = make_key(4);
+            let result = cache.record_access(key4, 100, AccessType::Get);
+
+            assert!(
+                !result.evicted.contains(&key2),
+                "High-contribution key2 should survive eviction"
+            );
+            assert!(cache.contains(&key2));
+        }
     }
 }
