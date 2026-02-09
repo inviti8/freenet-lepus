@@ -220,6 +220,8 @@ pub enum EncodingProtocol {
     Flatbuffers,
     /// Rust native types
     Native,
+    /// JSON for non-Rust clients
+    Json,
 }
 
 impl std::fmt::Display for EncodingProtocol {
@@ -227,6 +229,7 @@ impl std::fmt::Display for EncodingProtocol {
         match self {
             EncodingProtocol::Flatbuffers => write!(f, "flatbuffers"),
             EncodingProtocol::Native => write!(f, "native"),
+            EncodingProtocol::Json => write!(f, "json"),
         }
     }
 }

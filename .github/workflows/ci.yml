@@ -121,6 +121,12 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=mold
         run: cargo clippy --locked -- -D warnings
 
+      - name: clippy (lepus feature)
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=mold
+        run: cargo clippy -p freenet --features lepus --locked -- -D warnings
+
   test_all:
     name: Test
     runs-on: ubicloud-standard-16
@@ -185,6 +191,12 @@ jobs:
         # Operations tests use dynamic port allocation with unique IPs (127.x.y.1) and are fully thread-safe
         # Simulation tests excluded via feature flag (run separately below due to global state)
         run: cargo test --workspace --no-default-features --features trace,websocket,redb
+
+      - name: Test (lepus feature)
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=mold
+        run: cargo test -p freenet --features lepus --lib
 
       - name: Test simulation (serial)
         env:

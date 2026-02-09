@@ -271,6 +271,7 @@ impl headers::Header for EncodingProtocolExt {
             .and_then(|val| match val.to_str().ok()? {
                 "native" => Some(EncodingProtocolExt(EncodingProtocol::Native)),
                 "flatbuffers" => Some(EncodingProtocolExt(EncodingProtocol::Flatbuffers)),
+                "json" => Some(EncodingProtocolExt(EncodingProtocol::Json)),
                 _ => None,
             })
             .ok_or_else(headers::Error::invalid)
@@ -280,6 +281,7 @@ impl headers::Header for EncodingProtocolExt {
         let header = match self.0 {
             EncodingProtocol::Native => axum::http::HeaderValue::from_static("native"),
             EncodingProtocol::Flatbuffers => axum::http::HeaderValue::from_static("flatbuffers"),
+            EncodingProtocol::Json => axum::http::HeaderValue::from_static("json"),
         };
         values.extend([header]);
     }
@@ -473,6 +475,7 @@ async fn websocket_interface(
             EncodingProtocol::Native => {
                 bincode::serialize(&Err::<HostResponse, ClientError>(error))?
             }
+            EncodingProtocol::Json => serde_json::to_vec(&Err::<HostResponse, ClientError>(error))?,
         };
 
         server_sink
@@ -599,6 +602,7 @@ async fn websocket_interface(
                         Err(err) => err.into_fbs_bytes()?,
                     },
                     EncodingProtocol::Native => bincode::serialize(&response)?,
+                    EncodingProtocol::Json => serde_json::to_vec(&response)?,
                 };
                 server_sink.send(Message::Binary(serialized_res.into())).await.inspect_err(|err| {
                     tracing::debug!(err = %err, "error sending message to client");
@@ -683,6 +687,19 @@ async fn process_client_request(
                 Ok(decoded) => decoded.into_owned(),
                 Err(err) => {
                     let result_error = bincode::serialize(&Err::<HostResponse, ClientError>(
+                        ErrorKind::DeserializationError {
+                            cause: format!("{err}").into(),
+                        }
+                        .into(),
+                    ))
+                    .map_err(|err| Some(err.into()))?;
+                    return Ok(Some(Message::Binary(result_error.into())));
+                }
+            },
+            EncodingProtocol::Json => match serde_json::from_slice::<ClientRequest>(&msg) {
+                Ok(decoded) => decoded.into_owned(),
+                Err(err) => {
+                    let result_error = serde_json::to_vec(&Err::<HostResponse, ClientError>(
                         ErrorKind::DeserializationError {
                             cause: format!("{err}").into(),
                         }
@@ -800,6 +817,7 @@ async fn process_host_response(
                     Err(err) => err.into_fbs_bytes()?,
                 },
                 EncodingProtocol::Native => bincode::serialize(&result)?,
+                EncodingProtocol::Json => serde_json::to_vec(&result)?,
             };
 
             // Log serialization completion for UPDATE responses
