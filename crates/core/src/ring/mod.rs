@@ -249,6 +249,10 @@ impl Ring {
             TOPOLOGY_SNAPSHOT_INTERVAL,
         ));
 
+        // Spawn the Soroban commitment oracle worker (Lepus)
+        #[cfg(feature = "lepus")]
+        GlobalExecutor::spawn(hosting::oracle::OracleWorker::run(ring.clone()));
+
         Ok(ring)
     }
 
@@ -960,6 +964,23 @@ impl Ring {
     #[cfg(feature = "lepus")]
     pub fn record_bytes_consumed(&self, key: &ContractKey, bytes: u64) {
         self.hosting_manager.record_bytes_consumed(key, bytes);
+    }
+
+    /// Get all hosted contract keys.
+    #[cfg(feature = "lepus")]
+    pub fn hosted_contract_keys(&self) -> Vec<ContractKey> {
+        self.hosting_manager.hosted_contract_keys()
+    }
+
+    /// Batch-update commitment deposits for hosted contracts.
+    #[cfg(feature = "lepus")]
+    pub fn update_commitments_batch(
+        &self,
+        updates: &[(ContractKey, u64)],
+        check_time: Instant,
+    ) -> usize {
+        self.hosting_manager
+            .update_commitments_batch(updates, check_time)
     }
 
     // ==================== Hosting Cache Management ====================

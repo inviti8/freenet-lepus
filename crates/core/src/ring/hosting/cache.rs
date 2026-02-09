@@ -672,6 +672,32 @@ impl<T: TimeSource> HostingCache<T> {
     pub fn get_mut(&mut self, key: &ContractKey) -> Option<&mut HostedContract> {
         self.contracts.get_mut(key)
     }
+
+    /// Get all hosted contract keys.
+    #[cfg(feature = "lepus")]
+    pub fn contract_keys(&self) -> Vec<ContractKey> {
+        self.contracts.keys().cloned().collect()
+    }
+
+    /// Update the commitment deposit for a hosted contract.
+    ///
+    /// Sets `deposited_xlm` and `last_oracle_check` on the contract's
+    /// `CommitmentState`. Returns `true` if the key was found.
+    #[cfg(feature = "lepus")]
+    pub fn update_commitment(
+        &mut self,
+        key: &ContractKey,
+        deposited_xlm: u64,
+        check_time: Instant,
+    ) -> bool {
+        if let Some(contract) = self.contracts.get_mut(key) {
+            contract.commitment.deposited_xlm = deposited_xlm;
+            contract.commitment.last_oracle_check = Some(check_time);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[cfg(test)]

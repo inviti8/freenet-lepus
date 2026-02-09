@@ -1,0 +1,61 @@
+name: Contract Deploy
+
+on:
+  push:
+    tags:
+      - 'deploy-hvym-freenet-service-v*-testnet'
+      - 'deploy-hvym-freenet-service-v*-mainnet'
+
+jobs:
+  deploy:
+    name: Deploy Contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract network from tag
+        id: meta
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          if [[ "$TAG" == *-testnet ]]; then
+            echo "network=testnet" >> "$GITHUB_OUTPUT"
+          elif [[ "$TAG" == *-mainnet ]]; then
+            echo "network=mainnet" >> "$GITHUB_OUTPUT"
+          fi
+          # Extract version for release download
+          VERSION=$(echo "$TAG" | sed -E 's/deploy-hvym-freenet-service-(v[0-9.]+)-.*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download WASM from release
+        run: |
+          mkdir -p contracts/wasm
+          gh release download "release-hvym-freenet-service-${{ steps.meta.outputs.version }}" \
+            --pattern "hvym_freenet_service.optimized.wasm" \
+            --dir contracts/wasm
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Stellar CLI
+        run: cargo install stellar-cli --version 22.0.0 --locked
+
+      - name: Set up deployer identity
+        run: |
+          stellar keys add deployer \
+            --secret-key "${{ secrets.STELLAR_DEPLOYER_SECRET }}"
+
+      - name: Deploy contract
+        run: |
+          python3 contracts/deploy_contract.py \
+            --deployer-acct deployer \
+            --network ${{ steps.meta.outputs.network }}
+
+      - name: Commit deployments.json
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add contracts/deployments.json
+          git diff --staged --quiet || \
+            git commit -m "build: update deployments.json for ${{ steps.meta.outputs.network }}"
+          git push origin HEAD:main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

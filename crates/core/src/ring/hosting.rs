@@ -28,6 +28,8 @@
 //! - TTL protects recently accessed contracts from premature eviction
 
 mod cache;
+#[cfg(feature = "lepus")]
+pub(crate) mod oracle;
 
 use crate::util::backoff::{ExponentialBackoff, TrackedBackoff};
 use crate::util::time_source::InstantTimeSrc;
@@ -549,6 +551,32 @@ impl HostingManager {
     #[cfg(feature = "lepus")]
     pub fn record_bytes_consumed(&self, key: &ContractKey, bytes: u64) {
         self.hosting_cache.write().record_bytes_consumed(key, bytes);
+    }
+
+    /// Get all hosted contract keys.
+    #[cfg(feature = "lepus")]
+    pub fn hosted_contract_keys(&self) -> Vec<ContractKey> {
+        self.hosting_cache.read().contract_keys()
+    }
+
+    /// Batch-update commitment deposits for hosted contracts.
+    ///
+    /// Acquires a single write lock and applies all updates.
+    /// Returns the number of contracts that were found and updated.
+    #[cfg(feature = "lepus")]
+    pub fn update_commitments_batch(
+        &self,
+        updates: &[(ContractKey, u64)],
+        check_time: Instant,
+    ) -> usize {
+        let mut cache = self.hosting_cache.write();
+        let mut count = 0;
+        for (key, deposited_xlm) in updates {
+            if cache.update_commitment(key, *deposited_xlm, check_time) {
+                count += 1;
+            }
+        }
+        count
     }
 
     // =========================================================================
