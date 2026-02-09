@@ -235,6 +235,13 @@ cargo bench --bench transport_perf -- level0
 | [operations/README.md](operations/README.md) | Operation state machines |
 | [transport/README.md](transport/README.md) | Transport layer architecture |
 
+### Lepus (CWP Persistence)
+| Document | Description |
+|----------|-------------|
+| [lepus/README.md](lepus/README.md) | Commitment-Weighted Persistence overview and scoring |
+| [lepus/stellar-contract.md](lepus/stellar-contract.md) | Soroban deposit contract (`hvym-freenet-service`) |
+| [lepus/datapod-contract.md](lepus/datapod-contract.md) | WASM identity validator (datapod contract) |
+
 ### Transport Details
 | Document | Description |
 |----------|-------------|
