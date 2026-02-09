@@ -1,6 +1,6 @@
 use soroban_sdk::{Address, Env};
 
-use crate::types::{DataKey, DepositRecord};
+use crate::types::DataKey;
 
 /// Bump amount for persistent storage entries (roughly 30 days in ledgers).
 const LEDGER_BUMP: u32 = 518_400;
@@ -26,40 +26,39 @@ pub fn set_admin(env: &Env, admin: &Address) {
 }
 
 // =============================================================================
-// Deposits
+// Burn BPS
 // =============================================================================
 
-pub fn get_deposit(env: &Env, contract_id: &soroban_sdk::BytesN<32>) -> Option<DepositRecord> {
-    let key = DataKey::Deposit(contract_id.clone());
-    let record: Option<DepositRecord> = env.storage().persistent().get(&key);
-    if record.is_some() {
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, LEDGER_THRESHOLD, LEDGER_BUMP);
-    }
-    record
-}
-
-pub fn set_deposit(
-    env: &Env,
-    contract_id: &soroban_sdk::BytesN<32>,
-    record: &DepositRecord,
-) {
-    let key = DataKey::Deposit(contract_id.clone());
-    env.storage().persistent().set(&key, record);
+pub fn get_burn_bps(env: &Env) -> u32 {
     env.storage()
         .persistent()
-        .extend_ttl(&key, LEDGER_THRESHOLD, LEDGER_BUMP);
+        .get(&DataKey::BurnBps)
+        .expect("burn_bps not set")
 }
 
-pub fn has_deposit(env: &Env, contract_id: &soroban_sdk::BytesN<32>) -> bool {
+pub fn set_burn_bps(env: &Env, bps: u32) {
+    env.storage().persistent().set(&DataKey::BurnBps, &bps);
     env.storage()
         .persistent()
-        .has(&DataKey::Deposit(contract_id.clone()))
+        .extend_ttl(&DataKey::BurnBps, LEDGER_THRESHOLD, LEDGER_BUMP);
 }
 
-pub fn remove_deposit(env: &Env, contract_id: &soroban_sdk::BytesN<32>) {
+// =============================================================================
+// Token Address
+// =============================================================================
+
+pub fn get_token(env: &Env) -> Address {
     env.storage()
         .persistent()
-        .remove(&DataKey::Deposit(contract_id.clone()));
+        .get(&DataKey::TokenAddress)
+        .expect("token address not set")
+}
+
+pub fn set_token(env: &Env, token: &Address) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::TokenAddress, token);
+    env.storage()
+        .persistent()
+        .extend_ttl(&DataKey::TokenAddress, LEDGER_THRESHOLD, LEDGER_BUMP);
 }

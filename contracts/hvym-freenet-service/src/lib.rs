@@ -6,119 +6,79 @@ mod types;
 #[cfg(test)]
 mod test;
 
-use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, BytesN, Env, Vec};
-use types::DepositRecord;
+use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, BytesN, Env};
 
 #[contract]
 pub struct FreenetService;
 
 #[contractimpl]
 impl FreenetService {
-    /// Initialize the contract with an admin address.
-    pub fn __constructor(env: Env, admin: Address) {
+    /// Initialize the contract with an admin address, burn ratio, and token address.
+    ///
+    /// `burn_bps` is in basis points (0–10000, e.g. 3000 = 30%).
+    /// `token` is the native XLM SAC address.
+    pub fn __constructor(env: Env, admin: Address, burn_bps: u32, token: Address) {
+        assert!(burn_bps <= 10_000, "burn_bps must be <= 10000");
         storage::set_admin(&env, &admin);
+        storage::set_burn_bps(&env, burn_bps);
+        storage::set_token(&env, &token);
     }
 
-    /// Deposit native XLM for a Freenet contract ID.
+    /// Deposit native XLM for a Freenet contract ID. Non-refundable.
     ///
-    /// Creates a new deposit or tops up an existing one.
-    /// The caller must have approved the token transfer.
-    pub fn deposit(
-        env: Env,
-        caller: Address,
-        contract_id: BytesN<32>,
-        amount: i128,
-    ) -> DepositRecord {
+    /// Splits between SAC burn and contract treasury per `burn_bps`.
+    /// Emits: `("DEPOSIT", contract_id) → (caller, amount, burn_amount, ledger_seq)`
+    pub fn deposit(env: Env, caller: Address, contract_id: BytesN<32>, amount: i128) {
         caller.require_auth();
         assert!(amount > 0, "amount must be positive");
 
-        // Transfer native XLM from caller to this contract
-        let native_token = token::StellarAssetClient::new(&env, &env.current_contract_address());
-        // We use the token client for the transfer
-        let token_client = token::Client::new(&env, &native_token.address);
-        token_client.transfer(&caller, &env.current_contract_address(), &amount);
+        let burn_bps = storage::get_burn_bps(&env) as i128;
+        let burn_amount = amount * burn_bps / 10_000;
+        let treasury_amount = amount - burn_amount;
 
-        let ledger_seq = env.ledger().sequence();
+        let token_addr = storage::get_token(&env);
+        let xlm_client = token::Client::new(&env, &token_addr);
 
-        let record = if let Some(existing) = storage::get_deposit(&env, &contract_id) {
-            // Topup: increase amount
-            DepositRecord {
-                depositor: existing.depositor,
-                amount: existing.amount + amount,
-                created_at: existing.created_at,
-                updated_at: ledger_seq,
-            }
-        } else {
-            // New deposit
-            DepositRecord {
-                depositor: caller.clone(),
-                amount,
-                created_at: ledger_seq,
-                updated_at: ledger_seq,
-            }
-        };
-
-        storage::set_deposit(&env, &contract_id, &record);
-
-        env.events()
-            .publish((symbol_short!("DEPOSIT"), contract_id), record.clone());
-
-        record
-    }
-
-    /// Withdraw the full deposit for a Freenet contract ID.
-    ///
-    /// Only the original depositor can withdraw. Returns the withdrawn amount.
-    pub fn withdraw(env: Env, caller: Address, contract_id: BytesN<32>) -> i128 {
-        caller.require_auth();
-
-        let record = storage::get_deposit(&env, &contract_id)
-            .expect("no deposit found for this contract ID");
-
-        assert!(
-            record.depositor == caller,
-            "only the depositor can withdraw"
-        );
-
-        let amount = record.amount;
-
-        // Transfer XLM back to the depositor
-        let native_token = token::StellarAssetClient::new(&env, &env.current_contract_address());
-        let token_client = token::Client::new(&env, &native_token.address);
-        token_client.transfer(&env.current_contract_address(), &caller, &amount);
-
-        storage::remove_deposit(&env, &contract_id);
-
-        env.events()
-            .publish((symbol_short!("WITHDRAW"), contract_id), amount);
-
-        amount
-    }
-
-    /// Query the deposit for a single Freenet contract ID.
-    ///
-    /// Returns None if no deposit exists.
-    pub fn get_deposit(env: Env, contract_id: BytesN<32>) -> Option<DepositRecord> {
-        storage::get_deposit(&env, &contract_id)
-    }
-
-    /// Batch query deposits for multiple Freenet contract IDs.
-    ///
-    /// Returns a vector of (contract_id, deposit_record) pairs for
-    /// contracts that have deposits. Contracts without deposits are omitted.
-    pub fn get_deposits(
-        env: Env,
-        contract_ids: Vec<BytesN<32>>,
-    ) -> Vec<(BytesN<32>, DepositRecord)> {
-        let mut results = Vec::new(&env);
-
-        for id in contract_ids.iter() {
-            if let Some(record) = storage::get_deposit(&env, &id) {
-                results.push_back((id.clone(), record));
-            }
+        // Transfer treasury portion to this contract
+        if treasury_amount > 0 {
+            xlm_client.transfer(&caller, &env.current_contract_address(), &treasury_amount);
         }
 
-        results
+        // Burn the burn portion via SAC burn()
+        if burn_amount > 0 {
+            xlm_client.burn(&caller, &burn_amount);
+        }
+
+        env.events().publish(
+            (symbol_short!("DEPOSIT"), contract_id),
+            (caller, amount, burn_amount, env.ledger().sequence()),
+        );
+    }
+
+    /// Admin-only: withdraw XLM from the contract treasury.
+    pub fn admin_withdraw(env: Env, caller: Address, to: Address, amount: i128) {
+        caller.require_auth();
+        let admin = storage::get_admin(&env);
+        assert!(caller == admin, "only admin can withdraw");
+        assert!(amount > 0, "amount must be positive");
+
+        let token_addr = storage::get_token(&env);
+        let xlm_client = token::Client::new(&env, &token_addr);
+        xlm_client.transfer(&env.current_contract_address(), &to, &amount);
+
+        env.events().publish(
+            (symbol_short!("WITHDRAW"),),
+            (to, amount, env.ledger().sequence()),
+        );
+    }
+
+    /// Admin-only: update the burn ratio (basis points, 0–10000).
+    pub fn set_burn_bps(env: Env, caller: Address, burn_bps: u32) {
+        caller.require_auth();
+        let admin = storage::get_admin(&env);
+        assert!(caller == admin, "only admin can set burn ratio");
+        assert!(burn_bps <= 10_000, "burn_bps must be <= 10000");
+        storage::set_burn_bps(&env, burn_bps);
     }
 
     /// Transfer admin to a new address. Admin-only.

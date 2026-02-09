@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, BytesN};
+use soroban_sdk::contracttype;
 
 /// Storage keys for the contract.
 #[contracttype]
@@ -6,20 +6,8 @@ use soroban_sdk::{contracttype, Address, BytesN};
 pub enum DataKey {
     /// Admin address (persistent storage).
     Admin,
-    /// Deposit record keyed by Freenet contract ID hash (persistent storage).
-    Deposit(BytesN<32>),
-}
-
-/// A persistence deposit record.
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct DepositRecord {
-    /// Who deposited the XLM.
-    pub depositor: Address,
-    /// Amount in stroops (native XLM smallest unit).
-    pub amount: i128,
-    /// Ledger sequence when the deposit was created.
-    pub created_at: u32,
-    /// Ledger sequence of the last topup.
-    pub updated_at: u32,
+    /// Burn ratio in basis points, e.g. 3000 = 30% (persistent storage).
+    BurnBps,
+    /// Native XLM SAC token address (persistent storage).
+    TokenAddress,
 }

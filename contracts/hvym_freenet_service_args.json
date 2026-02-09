@@ -1,3 +1,4 @@
 {
-  "admin": "TESTNET_DEPLOYER"
+  "admin": "TESTNET_DEPLOYER",
+  "burn_bps": 3000
 }

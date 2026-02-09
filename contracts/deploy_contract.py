@@ -58,6 +58,7 @@ def main() -> None:
         constructor_args = json.load(f)
 
     admin_identity = constructor_args.get("admin", args.deployer_acct)
+    burn_bps = constructor_args.get("burn_bps", 3000)
 
     # Step 1: Upload WASM
     print("=== Uploading WASM ===")
@@ -77,6 +78,14 @@ def main() -> None:
         "stellar", "keys", "address", admin_identity,
     ])
 
+    # Get native XLM SAC address for the target network
+    native_xlm_address = run_capture([
+        "stellar", "contract", "id", "asset",
+        "--asset", "native",
+        "--network", args.network,
+    ])
+    print(f"  Native XLM SAC address: {native_xlm_address}")
+
     contract_id = run_capture([
         "stellar", "contract", "deploy",
         "--wasm-hash", wasm_hash,
@@ -84,6 +93,8 @@ def main() -> None:
         "--network", args.network,
         "--",
         "--admin", deployer_address,
+        "--burn_bps", str(burn_bps),
+        "--token", native_xlm_address,
     ])
     print(f"  Contract ID: {contract_id}")
 
@@ -97,6 +108,8 @@ def main() -> None:
         "contract_id": contract_id,
         "wasm_hash": wasm_hash,
         "admin": deployer_address,
+        "burn_bps": burn_bps,
+        "token": native_xlm_address,
         "network": args.network,
     }
 

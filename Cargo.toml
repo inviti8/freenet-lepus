@@ -8,6 +8,9 @@ members = [
 	"tests/test-contract-integration",
 	"tests/test-contract-update-nochange"
 ]
+exclude = [
+	"contracts/hvym-freenet-service",
+]
 
 [workspace.dependencies]
 arrayvec = { version = "0.7", features = ["serde"] }
