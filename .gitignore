@@ -72,3 +72,14 @@ test-results/
 worktrees/
 logs/
 .grepai/
+
+# Standalone contract crates (cdylib, not in workspace)
+contracts/*/Cargo.lock
+contracts/*/test_snapshots/
+
+# Research/design notes (not part of codebase)
+EVENT_BASED_PROOFS.md
+FREENET_RESEARCH.md
+
+# Windows artifact
+nul
