@@ -18,7 +18,7 @@ jobs:
           targets: wasm32v1-none
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libudev-dev
 
       - name: Install Stellar CLI
         run: cargo install stellar-cli --version 25.1.0 --locked
