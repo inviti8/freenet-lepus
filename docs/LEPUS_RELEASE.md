@@ -147,7 +147,7 @@ git push --tags
 **Trigger:** Tag matching `release-hvym-freenet-service-v*`
 
 **What happens** (`contract-release.yml`):
-1. Installs Stellar CLI v25.1.0 (with `opt` feature)
+1. Installs Stellar CLI v25.1.0
 2. Runs `stellar contract build --optimize`
 3. Creates a GitHub Release with `hvym_freenet_service.optimized.wasm` attached
 

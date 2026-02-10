@@ -18,7 +18,7 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Install Stellar CLI
-        run: cargo install stellar-cli --version 25.1.0 --locked --features opt
+        run: cargo install stellar-cli --version 25.1.0 --locked
 
       - name: Build and optimize contract
         run: |

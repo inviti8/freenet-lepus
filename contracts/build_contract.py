@@ -5,8 +5,8 @@ Usage:
     python contracts/build_contract.py                 # Build + optimize
     python contracts/build_contract.py --no-optimize   # Build only (faster dev)
 
-Requires: stellar-cli v25.1.0 with 'opt' feature
-    cargo install stellar-cli --version 25.1.0 --locked --features opt
+Requires: stellar-cli v25.1.0 (wasm-opt included by default)
+    cargo install stellar-cli --version 25.1.0 --locked
 """
 
 import argparse

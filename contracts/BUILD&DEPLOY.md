@@ -40,9 +40,9 @@ Go to **Settings > Secrets and variables > Actions > Repository secrets** and ad
   rustup target add wasm32-unknown-unknown
   ```
 - **Python 3** — for build/deploy scripts
-- **Stellar CLI v25.1.0** — only needed for hvym-freenet-service (the `opt` feature enables `--optimize` on build):
+- **Stellar CLI v25.1.0** — only needed for hvym-freenet-service (`wasm-opt` is included by default):
   ```bash
-  cargo install stellar-cli --version 25.1.0 --locked --features opt
+  cargo install stellar-cli --version 25.1.0 --locked
   ```
 
 ---
@@ -154,7 +154,7 @@ It then uploads the WASM, resolves the deployer address and native XLM SAC addre
 **Trigger:** Push tag matching `release-hvym-freenet-service-v*`
 
 **Steps:**
-1. Installs Rust + `wasm32-unknown-unknown` + Stellar CLI v25.1.0 (with `opt` feature)
+1. Installs Rust + `wasm32-unknown-unknown` + Stellar CLI v25.1.0
 2. Runs `stellar contract build --optimize --out-dir contracts/wasm`
 3. Creates a GitHub Release with `hvym_freenet_service.optimized.wasm` attached
 
