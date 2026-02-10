@@ -36,7 +36,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Stellar CLI
-        run: cargo install stellar-cli --version 25.1.0 --locked
+        run: cargo install stellar-cli --version 25.1.0 --locked --no-default-features
 
       - name: Set up deployer identity
         run: |
