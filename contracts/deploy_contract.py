@@ -30,7 +30,11 @@ DEPLOYMENTS_FILE = os.path.join(os.path.dirname(__file__), "deployments.json")
 
 def run_capture(cmd: list[str]) -> str:
     print(f"  > {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"  STDERR: {result.stderr.strip()}", file=sys.stderr)
+        print(f"  STDOUT: {result.stdout.strip()}", file=sys.stderr)
+        result.check_returncode()
     return result.stdout.strip()
 
 
@@ -60,7 +64,9 @@ def main() -> None:
     with open(ARGS_FILE) as f:
         constructor_args = json.load(f)
 
-    admin_identity = constructor_args.get("admin", args.deployer_acct)
+    # The deployer account is always used as admin; the args file "admin" field
+    # is ignored in favor of --deployer-acct (avoids identity name mismatches in CI).
+    admin_identity = args.deployer_acct
     burn_bps = constructor_args.get("burn_bps", 3000)
 
     # Step 1: Upload WASM
