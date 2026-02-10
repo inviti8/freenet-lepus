@@ -121,7 +121,7 @@ python contracts/build_contract.py --no-optimize # Build only (faster)
 - `contracts/wasm/hvym_freenet_service.optimized.wasm` (default, with optimization)
 - `contracts/wasm/hvym_freenet_service.wasm` (with `--no-optimize`)
 
-The script runs `stellar contract build` then `stellar contract optimize`, and copies the result to `contracts/wasm/`.
+The script runs `stellar contract build --optimize --out-dir contracts/wasm` (a single command that builds, optimizes, and copies the output).
 
 ### Local Deploy
 
@@ -154,8 +154,8 @@ It then uploads the WASM, resolves the deployer address and native XLM SAC addre
 **Trigger:** Push tag matching `release-hvym-freenet-service-v*`
 
 **Steps:**
-1. Installs Rust + `wasm32-unknown-unknown` + Stellar CLI v22.0.0
-2. Runs `stellar contract build` + `stellar contract optimize`
+1. Installs Rust + `wasm32-unknown-unknown` + Stellar CLI v22.0.0 (with `opt` feature)
+2. Runs `stellar contract build --optimize --out-dir contracts/wasm`
 3. Creates a GitHub Release with `hvym_freenet_service.optimized.wasm` attached
 
 **Example:**

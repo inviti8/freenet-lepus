@@ -20,20 +20,12 @@ jobs:
       - name: Install Stellar CLI
         run: cargo install stellar-cli --version 22.0.0 --locked --features opt
 
-      - name: Build contract
-        run: stellar contract build
-        working-directory: contracts/hvym-freenet-service
-
-      - name: Optimize WASM
-        run: |
-          stellar contract optimize \
-            --wasm target/wasm32-unknown-unknown/release/hvym_freenet_service.wasm
-
-      - name: Copy optimized WASM
+      - name: Build and optimize contract
         run: |
           mkdir -p contracts/wasm
-          cp contracts/hvym-freenet-service/target/wasm32-unknown-unknown/release/hvym_freenet_service.wasm \
-             contracts/wasm/hvym_freenet_service.optimized.wasm
+          stellar contract build --optimize \
+            --manifest-path contracts/hvym-freenet-service/Cargo.toml \
+            --out-dir contracts/wasm
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
