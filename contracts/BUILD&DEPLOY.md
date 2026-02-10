@@ -152,25 +152,36 @@ It then uploads the WASM (`stellar contract upload`), resolves the deployer addr
 
 ### CI Release (`contract-release.yml`)
 
-**Trigger:** Push tag matching `release-hvym-freenet-service-v*`
+**Trigger:** Push tag matching `release-hvym-freenet-service-v*` or `fast-release-hvym-freenet-service-v*`
+
+Both produce the same WASM artifact. The difference is how Stellar CLI is installed:
+- **Standard** (`release-*`): Compiles `stellar-cli` from source (~5–10 min install)
+- **Fast** (`fast-release-*`): Downloads pre-built `stellar-cli` binary (~10 sec install)
 
 **Steps:**
 1. Installs Rust + `wasm32v1-none` + Stellar CLI v25.1.0
-2. Runs `stellar contract build --optimize --out-dir contracts/wasm`
+2. Runs `stellar contract build --optimize`
 3. Creates a GitHub Release with `hvym_freenet_service.optimized.wasm` attached
 
 **Example:**
 ```bash
+# Standard release (slower, compiles CLI from source)
 git tag release-hvym-freenet-service-v0.1.0
+git push --tags
+
+# Fast release (downloads pre-built CLI binary)
+git tag fast-release-hvym-freenet-service-v0.1.0
 git push --tags
 ```
 
 ### CI Deploy (`contract-deploy.yml`)
 
-**Trigger:** Push tag matching `deploy-hvym-freenet-service-v*-testnet` or `deploy-hvym-freenet-service-v*-mainnet`
+**Trigger:** Push tag matching `deploy-hvym-freenet-service-v*-{network}` or `fast-deploy-hvym-freenet-service-v*-{network}`
+
+Both deploy identically. The fast variant downloads the pre-built CLI binary instead of compiling from source.
 
 **Requires:**
-- A prior release build — the deploy workflow downloads the WASM from the matching GitHub Release
+- A prior release build — the deploy workflow downloads the WASM from the matching GitHub Release (tries both `release-*` and `fast-release-*` tags)
 - `STELLAR_DEPLOYER_SECRET` repository secret (see [GitHub Repository Setup](#github-repository-setup-required-for-ci))
 
 **Steps:**
@@ -183,12 +194,12 @@ git push --tags
 
 **Example:**
 ```bash
-# Deploy to testnet
+# Standard deploy to testnet
 git tag deploy-hvym-freenet-service-v0.1.0-testnet
 git push --tags
 
-# Deploy to mainnet
-git tag deploy-hvym-freenet-service-v0.1.0-mainnet
+# Fast deploy to testnet
+git tag fast-deploy-hvym-freenet-service-v0.1.0-testnet
 git push --tags
 ```
 
@@ -196,12 +207,12 @@ git push --tags
 
 ```bash
 # Step 1: Build — CI creates GitHub Release with WASM artifact
-git tag release-hvym-freenet-service-v0.1.0
+git tag fast-release-hvym-freenet-service-v0.1.0
 git push --tags
 # Wait for the "Contract Release" workflow to complete...
 
 # Step 2: Deploy — CI deploys to testnet and commits deployments.json
-git tag deploy-hvym-freenet-service-v0.1.0-testnet
+git tag fast-deploy-hvym-freenet-service-v0.1.0-testnet
 git push --tags
 ```
 

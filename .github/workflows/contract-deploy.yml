@@ -5,6 +5,11 @@ on:
     tags:
       - 'deploy-hvym-freenet-service-v*-testnet'
       - 'deploy-hvym-freenet-service-v*-mainnet'
+      - 'fast-deploy-hvym-freenet-service-v*-testnet'
+      - 'fast-deploy-hvym-freenet-service-v*-mainnet'
+
+env:
+  STELLAR_CLI_VERSION: 25.1.0
 
 jobs:
   deploy:
@@ -13,30 +18,67 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Extract network from tag
+      - name: Extract metadata from tag
         id: meta
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
+
+          # Detect fast deploy
+          if [[ "$TAG" == fast-deploy-* ]]; then
+            echo "fast=true" >> "$GITHUB_OUTPUT"
+            TAG="${TAG#fast-}"
+          else
+            echo "fast=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Extract network
           if [[ "$TAG" == *-testnet ]]; then
             echo "network=testnet" >> "$GITHUB_OUTPUT"
           elif [[ "$TAG" == *-mainnet ]]; then
             echo "network=mainnet" >> "$GITHUB_OUTPUT"
           fi
-          # Extract version for release download
+
+          # Extract version — strip prefix and network suffix
           VERSION=$(echo "$TAG" | sed -E 's/deploy-hvym-freenet-service-(v[0-9.]+)-.*/\1/')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          # The release tag to download from (always the non-fast release tag,
+          # but also check for fast-release tag)
+          echo "release_tag=release-hvym-freenet-service-$VERSION" >> "$GITHUB_OUTPUT"
+          echo "fast_release_tag=fast-release-hvym-freenet-service-$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Download WASM from release
         run: |
           mkdir -p contracts/wasm
-          gh release download "release-hvym-freenet-service-${{ steps.meta.outputs.version }}" \
+          # Try the standard release tag first, then the fast-release tag
+          gh release download "${{ steps.meta.outputs.release_tag }}" \
+            --pattern "hvym_freenet_service.optimized.wasm" \
+            --dir contracts/wasm 2>/dev/null || \
+          gh release download "${{ steps.meta.outputs.fast_release_tag }}" \
             --pattern "hvym_freenet_service.optimized.wasm" \
             --dir contracts/wasm
+
+          ls -lh contracts/wasm/hvym_freenet_service.optimized.wasm
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Stellar CLI
-        run: cargo install stellar-cli --version 25.1.0 --locked --no-default-features
+      # --- Standard deploy: compile stellar-cli from source ---
+      - name: Install Stellar CLI (from source)
+        if: steps.meta.outputs.fast == 'false'
+        run: cargo install stellar-cli --version ${{ env.STELLAR_CLI_VERSION }} --locked --no-default-features
+
+      # --- Fast deploy: download pre-built binary ---
+      - name: Install Stellar CLI (pre-built binary)
+        if: steps.meta.outputs.fast == 'true'
+        run: |
+          VERSION=${{ env.STELLAR_CLI_VERSION }}
+          curl -L -o stellar-cli.tar.gz \
+            "https://github.com/stellar/stellar-cli/releases/download/v${VERSION}/stellar-cli-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          tar xzf stellar-cli.tar.gz
+          chmod +x stellar
+          sudo mv stellar /usr/local/bin/
+          stellar --version
+          rm -f stellar-cli.tar.gz
 
       - name: Set up deployer identity
         run: |

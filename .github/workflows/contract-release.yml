@@ -4,9 +4,13 @@ on:
   push:
     tags:
       - 'release-hvym-freenet-service-v*'
+      - 'fast-release-hvym-freenet-service-v*'
 
 permissions:
   contents: write
+
+env:
+  STELLAR_CLI_VERSION: 25.1.0
 
 jobs:
   build:
@@ -15,16 +19,50 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Detect fast release
+        id: meta
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          if [[ "$TAG" == fast-release-* ]]; then
+            echo "fast=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "fast=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32v1-none
 
+      # --- Standard build: compile stellar-cli from source ---
       - name: Install system dependencies
+        if: steps.meta.outputs.fast == 'false'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libudev-dev
 
-      - name: Install Stellar CLI
-        run: cargo install stellar-cli --version 25.1.0 --locked
+      - name: Install Stellar CLI (from source)
+        if: steps.meta.outputs.fast == 'false'
+        run: cargo install stellar-cli --version ${{ env.STELLAR_CLI_VERSION }} --locked
+
+      # --- Fast build: download pre-built binary ---
+      - name: Install Stellar CLI (pre-built binary)
+        if: steps.meta.outputs.fast == 'true'
+        run: |
+          VERSION=${{ env.STELLAR_CLI_VERSION }}
+          curl -L -o stellar-cli.tar.gz \
+            "https://github.com/stellar/stellar-cli/releases/download/v${VERSION}/stellar-cli-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          tar xzf stellar-cli.tar.gz
+          chmod +x stellar
+          sudo mv stellar /usr/local/bin/
+          stellar --version
+          rm -f stellar-cli.tar.gz
+
+      - name: Install wasm-opt
+        if: steps.meta.outputs.fast == 'true'
+        run: |
+          wget -q https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-linux.tar.gz
+          tar xzf binaryen-version_116-x86_64-linux.tar.gz
+          sudo cp binaryen-version_116/bin/wasm-opt /usr/local/bin/
+          rm -rf binaryen-version_116 binaryen-version_116-x86_64-linux.tar.gz
 
       - name: Build and optimize contract
         working-directory: contracts/hvym-freenet-service
