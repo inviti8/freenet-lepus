@@ -81,10 +81,9 @@ jobs:
           rm -f stellar-cli.tar.gz
 
       - name: Set up deployer identity
-        run: |
-          stellar keys add deployer \
-            --secret-key "${{ secrets.STELLAR_DEPLOYER_SECRET }}" \
-            --overwrite
+        run: stellar keys add deployer --secret-key --overwrite
+        env:
+          STELLAR_SECRET_KEY: ${{ secrets.STELLAR_DEPLOYER_SECRET }}
 
       - name: Deploy contract
         run: |
