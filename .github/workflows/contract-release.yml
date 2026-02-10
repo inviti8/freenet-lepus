@@ -5,6 +5,9 @@ on:
     tags:
       - 'release-hvym-freenet-service-v*'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build & Release Contract WASM
@@ -24,16 +27,32 @@ jobs:
         run: cargo install stellar-cli --version 25.1.0 --locked
 
       - name: Build and optimize contract
+        working-directory: contracts/hvym-freenet-service
+        run: stellar contract build --optimize
+
+      - name: Prepare release assets
         run: |
-          mkdir -p contracts/wasm
-          stellar contract build --optimize \
-            --manifest-path contracts/hvym-freenet-service/Cargo.toml \
-            --out-dir contracts/wasm
+          mkdir -p release-wasm
+
+          # Find the optimized WASM — stellar contract build --optimize places it
+          # in the target directory relative to the contract crate
+          WASM_FILE=$(find contracts/hvym-freenet-service/target -name "hvym_freenet_service.optimized.wasm" -type f 2>/dev/null | head -1)
+
+          if [ -z "$WASM_FILE" ]; then
+            echo "::error::Optimized WASM not found in target directory"
+            echo "Searching for any .wasm files:"
+            find contracts/hvym-freenet-service/target -name "*.wasm" -type f 2>/dev/null
+            exit 1
+          fi
+
+          cp "$WASM_FILE" release-wasm/hvym_freenet_service.optimized.wasm
+          echo "WASM file: $(ls -lh release-wasm/hvym_freenet_service.optimized.wasm)"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: contracts/wasm/hvym_freenet_service.optimized.wasm
+          files: release-wasm/hvym_freenet_service.optimized.wasm
+          fail_on_unmatched_files: true
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
