@@ -4,9 +4,12 @@
 Usage:
     python contracts/deploy_contract.py --deployer-acct testnet_DEPLOYER --network testnet
 
+Requires: stellar-cli v25.1.0
+    cargo install stellar-cli --version 25.1.0 --locked
+
 Steps:
-    1. Upload WASM to the network
-    2. Deploy contract with constructor args
+    1. Upload WASM to the network (stellar contract upload)
+    2. Deploy contract with constructor args (stellar contract deploy)
     3. Save deployment info to contracts/deployments.json
 """
 
@@ -63,9 +66,9 @@ def main() -> None:
     # Step 1: Upload WASM
     print("=== Uploading WASM ===")
     wasm_hash = run_capture([
-        "stellar", "contract", "install",
+        "stellar", "contract", "upload",
         "--wasm", WASM_PATH,
-        "--source", args.deployer_acct,
+        "--source-account", args.deployer_acct,
         "--network", args.network,
     ])
     print(f"  WASM hash: {wasm_hash}")
@@ -89,7 +92,7 @@ def main() -> None:
     contract_id = run_capture([
         "stellar", "contract", "deploy",
         "--wasm-hash", wasm_hash,
-        "--source", args.deployer_acct,
+        "--source-account", args.deployer_acct,
         "--network", args.network,
         "--",
         "--admin", deployer_address,

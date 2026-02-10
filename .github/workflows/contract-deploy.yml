@@ -41,7 +41,8 @@ jobs:
       - name: Set up deployer identity
         run: |
           stellar keys add deployer \
-            --secret-key "${{ secrets.STELLAR_DEPLOYER_SECRET }}"
+            --secret-key "${{ secrets.STELLAR_DEPLOYER_SECRET }}" \
+            --overwrite
 
       - name: Deploy contract
         run: |

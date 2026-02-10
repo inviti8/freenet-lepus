@@ -8,7 +8,7 @@ This repository contains three smart contracts. Two are **Freenet WASM** contrac
 | deposit-index | Freenet WASM | `deposit-index/` | `freenet-contract-release.yml` |
 | datapod | Freenet WASM | `datapod/` | `freenet-contract-release.yml` |
 
-All three are **standalone crates** (excluded from the workspace) because they target `wasm32-unknown-unknown` with incompatible dependency trees.
+All three are **standalone crates** (excluded from the workspace) because they target WASM with incompatible dependency trees.
 
 ---
 
@@ -35,9 +35,10 @@ Go to **Settings > Secrets and variables > Actions > Repository secrets** and ad
 
 ## Local Prerequisites
 
-- **Rust stable** with the WASM target:
+- **Rust stable** (1.84+) with WASM targets:
   ```bash
-  rustup target add wasm32-unknown-unknown
+  rustup target add wasm32v1-none           # Soroban contracts (stellar contract build)
+  rustup target add wasm32-unknown-unknown  # Freenet WASM contracts (cargo build)
   ```
 - **Python 3** — for build/deploy scripts
 - **Stellar CLI v25.1.0** — only needed for hvym-freenet-service (`wasm-opt` is included by default):
@@ -147,14 +148,14 @@ The deploy script reads constructor args from `hvym_freenet_service_args.json`:
 | `admin` | Stellar CLI identity name for the admin role |
 | `burn_bps` | Burn ratio in basis points (3000 = 30%) |
 
-It then uploads the WASM, resolves the deployer address and native XLM SAC address, deploys with the constructor args, and saves the result to `contracts/deployments.json`.
+It then uploads the WASM (`stellar contract upload`), resolves the deployer address and native XLM SAC address, deploys with the constructor args, and saves the result to `contracts/deployments.json`.
 
 ### CI Release (`contract-release.yml`)
 
 **Trigger:** Push tag matching `release-hvym-freenet-service-v*`
 
 **Steps:**
-1. Installs Rust + `wasm32-unknown-unknown` + Stellar CLI v25.1.0
+1. Installs Rust + `wasm32v1-none` + Stellar CLI v25.1.0
 2. Runs `stellar contract build --optimize --out-dir contracts/wasm`
 3. Creates a GitHub Release with `hvym_freenet_service.optimized.wasm` attached
 
