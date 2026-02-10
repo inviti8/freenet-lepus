@@ -34,17 +34,18 @@ jobs:
         run: |
           mkdir -p release-wasm
 
-          # Find the optimized WASM — stellar contract build --optimize places it
-          # in the target directory relative to the contract crate
-          WASM_FILE=$(find contracts/hvym-freenet-service/target -name "hvym_freenet_service.optimized.wasm" -type f 2>/dev/null | head -1)
+          # stellar contract build --optimize in v25 produces the optimized WASM
+          # at target/wasm32v1-none/release/<name>.wasm (no .optimized suffix)
+          WASM_FILE="contracts/hvym-freenet-service/target/wasm32v1-none/release/hvym_freenet_service.wasm"
 
-          if [ -z "$WASM_FILE" ]; then
-            echo "::error::Optimized WASM not found in target directory"
+          if [ ! -f "$WASM_FILE" ]; then
+            echo "::error::WASM not found at $WASM_FILE"
             echo "Searching for any .wasm files:"
             find contracts/hvym-freenet-service/target -name "*.wasm" -type f 2>/dev/null
             exit 1
           fi
 
+          # Rename to .optimized.wasm for the release asset (deploy workflow expects this name)
           cp "$WASM_FILE" release-wasm/hvym_freenet_service.optimized.wasm
           echo "WASM file: $(ls -lh release-wasm/hvym_freenet_service.optimized.wasm)"
 

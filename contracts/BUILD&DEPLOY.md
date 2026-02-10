@@ -122,7 +122,7 @@ python contracts/build_contract.py --no-optimize # Build only (faster)
 - `contracts/wasm/hvym_freenet_service.optimized.wasm` (default, with optimization)
 - `contracts/wasm/hvym_freenet_service.wasm` (with `--no-optimize`)
 
-The script runs `stellar contract build --optimize --out-dir contracts/wasm` as a single step (v25.1.0 supports `--optimize` directly on build).
+The script runs `stellar contract build --optimize`, then copies the output from the target directory to `contracts/wasm/`. In CLI v25.1.0, `--optimize` applies wasm-opt in-place (the output is always `<name>.wasm`, not `<name>.optimized.wasm`); the script renames it to `.optimized.wasm` for consistency.
 
 ### Local Deploy
 

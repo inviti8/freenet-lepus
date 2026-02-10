@@ -38,24 +38,35 @@ def main() -> None:
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    if args.no_optimize:
-        # Build without optimization
+    # CLI v25.1.0: --optimize applies wasm-opt in-place; output is always
+    # <name>.wasm (no .optimized suffix like the old separate optimize command).
+    build_cmd = ["stellar", "contract", "build"]
+    if not args.no_optimize:
+        build_cmd.append("--optimize")
+        print("=== Building and optimizing hvym-freenet-service ===")
+    else:
         print("=== Building hvym-freenet-service ===")
-        run(["stellar", "contract", "build", "--out-dir", OUTPUT_DIR], cwd=CONTRACT_DIR)
+
+    run(build_cmd, cwd=CONTRACT_DIR)
+
+    # The WASM is in the target dir; copy to output dir with the expected name
+    import glob as _glob
+
+    wasm_pattern = os.path.join(CONTRACT_DIR, "target", "*", "release", "hvym_freenet_service.wasm")
+    matches = _glob.glob(wasm_pattern)
+    if not matches:
+        print(f"ERROR: WASM not found matching {wasm_pattern}", file=sys.stderr)
+        sys.exit(1)
+
+    built_wasm = matches[0]
+
+    if args.no_optimize:
         output = os.path.join(OUTPUT_DIR, "hvym_freenet_service.wasm")
     else:
-        # Build + optimize in a single step (CLI v25.1.0+)
-        print("=== Building and optimizing hvym-freenet-service ===")
-        run([
-            "stellar", "contract", "build",
-            "--optimize",
-            "--out-dir", OUTPUT_DIR,
-        ], cwd=CONTRACT_DIR)
         output = os.path.join(OUTPUT_DIR, "hvym_freenet_service.optimized.wasm")
 
-    if not os.path.isfile(output):
-        print(f"ERROR: WASM not found at {output}", file=sys.stderr)
-        sys.exit(1)
+    import shutil
+    shutil.copy2(built_wasm, output)
 
     size = os.path.getsize(output)
     print(f"=== Done: {output} ({size:,} bytes) ===")
