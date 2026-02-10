@@ -20,6 +20,7 @@ fn setup_env(
 ) {
     let env = Env::default();
     env.mock_all_auths();
+    env.cost_estimate().budget().reset_unlimited();
 
     let admin = Address::generate(&env);
 
@@ -69,6 +70,7 @@ fn test_constructor_sets_burn_bps() {
 fn test_constructor_rejects_invalid_burn_bps() {
     let env = Env::default();
     env.mock_all_auths();
+    env.cost_estimate().budget().reset_unlimited();
     let admin = Address::generate(&env);
     let token_admin = Address::generate(&env);
     let token_contract = env.register_stellar_asset_contract_v2(token_admin);

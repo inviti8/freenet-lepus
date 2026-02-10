@@ -40,9 +40,9 @@ Go to **Settings > Secrets and variables > Actions > Repository secrets** and ad
   rustup target add wasm32-unknown-unknown
   ```
 - **Python 3** — for build/deploy scripts
-- **Stellar CLI v22.0.0** — only needed for hvym-freenet-service (the `opt` feature enables `stellar contract optimize`):
+- **Stellar CLI v25.1.0** — only needed for hvym-freenet-service (the `opt` feature enables `--optimize` on build):
   ```bash
-  cargo install stellar-cli --version 22.0.0 --locked --features opt
+  cargo install stellar-cli --version 25.1.0 --locked --features opt
   ```
 
 ---
@@ -121,7 +121,7 @@ python contracts/build_contract.py --no-optimize # Build only (faster)
 - `contracts/wasm/hvym_freenet_service.optimized.wasm` (default, with optimization)
 - `contracts/wasm/hvym_freenet_service.wasm` (with `--no-optimize`)
 
-The script runs `stellar contract build --optimize --out-dir contracts/wasm` (a single command that builds, optimizes, and copies the output).
+The script runs `stellar contract build --optimize --out-dir contracts/wasm` as a single step (v25.1.0 supports `--optimize` directly on build).
 
 ### Local Deploy
 
@@ -154,7 +154,7 @@ It then uploads the WASM, resolves the deployer address and native XLM SAC addre
 **Trigger:** Push tag matching `release-hvym-freenet-service-v*`
 
 **Steps:**
-1. Installs Rust + `wasm32-unknown-unknown` + Stellar CLI v22.0.0 (with `opt` feature)
+1. Installs Rust + `wasm32-unknown-unknown` + Stellar CLI v25.1.0 (with `opt` feature)
 2. Runs `stellar contract build --optimize --out-dir contracts/wasm`
 3. Creates a GitHub Release with `hvym_freenet_service.optimized.wasm` attached
 
@@ -175,7 +175,7 @@ git push --tags
 **Steps:**
 1. Extracts version and network from the tag name
 2. Downloads `hvym_freenet_service.optimized.wasm` from the corresponding release
-3. Installs Stellar CLI v22.0.0
+3. Installs Stellar CLI v25.1.0
 4. Sets up deployer identity from `STELLAR_DEPLOYER_SECRET`
 5. Runs `deploy_contract.py`
 6. Commits updated `contracts/deployments.json` to `main`

@@ -4,6 +4,9 @@
 Usage:
     python contracts/build_contract.py                 # Build + optimize
     python contracts/build_contract.py --no-optimize   # Build only (faster dev)
+
+Requires: stellar-cli v25.1.0 with 'opt' feature
+    cargo install stellar-cli --version 25.1.0 --locked --features opt
 """
 
 import argparse
@@ -35,23 +38,23 @@ def main() -> None:
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # Build (and optionally optimize) in one step.
-    # stellar contract build --optimize produces <name>.optimized.wasm in --out-dir.
-    # Without --optimize it produces <name>.wasm.
-    cmd = ["stellar", "contract", "build", "--out-dir", OUTPUT_DIR]
-    if not args.no_optimize:
-        cmd.append("--optimize")
-
-    print("=== Building hvym-freenet-service ===")
-    run(cmd, cwd=CONTRACT_DIR)
-
     if args.no_optimize:
+        # Build without optimization
+        print("=== Building hvym-freenet-service ===")
+        run(["stellar", "contract", "build", "--out-dir", OUTPUT_DIR], cwd=CONTRACT_DIR)
         output = os.path.join(OUTPUT_DIR, "hvym_freenet_service.wasm")
     else:
+        # Build + optimize in a single step (CLI v25.1.0+)
+        print("=== Building and optimizing hvym-freenet-service ===")
+        run([
+            "stellar", "contract", "build",
+            "--optimize",
+            "--out-dir", OUTPUT_DIR,
+        ], cwd=CONTRACT_DIR)
         output = os.path.join(OUTPUT_DIR, "hvym_freenet_service.optimized.wasm")
 
     if not os.path.isfile(output):
-        print(f"ERROR: Expected WASM not found at {output}", file=sys.stderr)
+        print(f"ERROR: WASM not found at {output}", file=sys.stderr)
         sys.exit(1)
 
     size = os.path.getsize(output)
