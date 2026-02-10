@@ -1,31 +1,115 @@
 # Contract Build & Deploy Guide
 
-## Quick Reference
+This repository contains three smart contracts. Two are **Freenet WASM** contracts deployed to the Freenet network, and one is a **Soroban** contract deployed to the Stellar blockchain.
 
-| Contract | Type | Location | Build Tool | CI Workflow |
-|----------|------|----------|------------|-------------|
-| hvym-freenet-service | Soroban (Stellar) | `contracts/hvym-freenet-service/` | `stellar contract build` | `contract-release.yml`, `contract-deploy.yml` |
-| deposit-index | Freenet WASM | `contracts/deposit-index/` | `build_freenet_contract.py` | `freenet-contract-release.yml` |
-| datapod | Freenet WASM | `contracts/datapod/` | `build_freenet_contract.py` | `freenet-contract-release.yml` |
+| Contract | Type | Location | CI Workflow |
+|----------|------|----------|-------------|
+| hvym-freenet-service | Soroban (Stellar) | `hvym-freenet-service/` | `contract-release.yml` + `contract-deploy.yml` |
+| deposit-index | Freenet WASM | `deposit-index/` | `freenet-contract-release.yml` |
+| datapod | Freenet WASM | `datapod/` | `freenet-contract-release.yml` |
 
-All three contract crates are **standalone** (excluded from the workspace) because they target `wasm32-unknown-unknown` and have incompatible dependency trees.
-
-## Prerequisites
-
-- **Rust stable** with `wasm32-unknown-unknown` target:
-  ```
-  rustup target add wasm32-unknown-unknown
-  ```
-- **Stellar CLI v22.0.0** (for hvym-freenet-service only):
-  ```
-  cargo install stellar-cli --version 22.0.0 --locked
-  ```
-- **Python 3** (for build/deploy scripts)
-- **Stellar testnet account** with funded identity (for deployment)
+All three are **standalone crates** (excluded from the workspace) because they target `wasm32-unknown-unknown` with incompatible dependency trees.
 
 ---
 
-## hvym-freenet-service (Soroban Contract)
+## GitHub Repository Setup (Required for CI)
+
+Before using the CI workflows, configure these settings in your GitHub repository:
+
+### 1. Workflow Permissions
+
+Go to **Settings > Actions > General > Workflow permissions** and select:
+- **Read and write permissions** (required because the Freenet contract release and Soroban deploy workflows commit build artifacts back to `main`)
+
+### 2. Repository Secrets
+
+Go to **Settings > Secrets and variables > Actions > Repository secrets** and add:
+
+| Secret | Required By | How to Obtain |
+|--------|-------------|---------------|
+| `STELLAR_DEPLOYER_SECRET` | `contract-deploy.yml` (Soroban deploy only) | The Stellar secret key (starts with `S...`) of the account that will deploy the Soroban contract. Generate one locally with `stellar keys generate deployer --network testnet --fund` then retrieve it with `stellar keys show deployer` |
+
+> `GITHUB_TOKEN` is provided automatically by GitHub Actions — you do not need to create it.
+
+---
+
+## Local Prerequisites
+
+- **Rust stable** with the WASM target:
+  ```bash
+  rustup target add wasm32-unknown-unknown
+  ```
+- **Python 3** — for build/deploy scripts
+- **Stellar CLI v22.0.0** — only needed for hvym-freenet-service:
+  ```bash
+  cargo install stellar-cli --version 22.0.0 --locked
+  ```
+
+---
+
+## Freenet WASM Contracts (deposit-index, datapod)
+
+These two contracts share the same build script and CI workflow.
+
+### Local Build
+
+```bash
+# Build deposit-index → contracts/wasm/deposit_index.wasm
+python contracts/build_freenet_contract.py --contract deposit-index
+
+# Build datapod → contracts/wasm/datapod_contract.wasm
+python contracts/build_freenet_contract.py --contract datapod
+```
+
+The script reads the crate's `Cargo.toml` to derive the WASM filename, runs `cargo build --target wasm32-unknown-unknown --release`, and copies the output to `contracts/wasm/`.
+
+You can also build directly without the script:
+```bash
+cd contracts/deposit-index
+cargo build --target wasm32-unknown-unknown --release
+# Output: target/wasm32-unknown-unknown/release/deposit_index.wasm
+```
+
+### Tests
+
+```bash
+cd contracts/deposit-index && cargo test    # 19 tests (SCP envelope + Ed25519 sig verification)
+cd contracts/datapod && cargo test
+```
+
+### CI Release (`freenet-contract-release.yml`)
+
+Push a tag to build, commit the WASM to `contracts/wasm/` on `main`, and create a GitHub Release:
+
+```bash
+# deposit-index
+git tag release-deposit-index-v0.1.0
+git push --tags
+
+# datapod
+git tag release-datapod-v0.1.0
+git push --tags
+```
+
+**Tag pattern:** `release-<contract-name>-v<version>` (e.g., `release-deposit-index-v0.1.0`)
+
+**What the workflow does:**
+1. Extracts the contract directory name from the tag
+2. Installs Rust + `wasm32-unknown-unknown` target
+3. Runs `build_freenet_contract.py --contract <name>`
+4. Commits the built WASM to `contracts/wasm/` on `main`
+5. Creates a GitHub Release with the WASM attached
+
+### Deployment to Freenet
+
+Freenet WASM contracts are deployed via the `fdev` tool or the Freenet node API (contract PUT operation), not through CI. Each contract requires its own parameters:
+
+- **deposit-index** — `DepositIndexParams` (validator public keys, quorum configuration)
+- **datapod** — `DatapodParams` (creator pubkey, recipient pubkey) which produce a unique `ContractKey` per instance
+
+---
+
+## Soroban Contract (hvym-freenet-service)
 
 ### Local Build
 
@@ -34,36 +118,23 @@ python contracts/build_contract.py              # Build + optimize
 python contracts/build_contract.py --no-optimize # Build only (faster)
 ```
 
-The script runs:
-1. `stellar contract build` in `contracts/hvym-freenet-service/`
-2. `stellar contract optimize --wasm target/wasm32-unknown-unknown/release/hvym_freenet_service.wasm`
-3. Copies the result to `contracts/wasm/`
-
 **Output:**
-- Optimized: `contracts/wasm/hvym_freenet_service.optimized.wasm`
-- Unoptimized (`--no-optimize`): `contracts/wasm/hvym_freenet_service.wasm`
+- `contracts/wasm/hvym_freenet_service.optimized.wasm` (default, with optimization)
+- `contracts/wasm/hvym_freenet_service.wasm` (with `--no-optimize`)
+
+The script runs `stellar contract build` then `stellar contract optimize`, and copies the result to `contracts/wasm/`.
 
 ### Local Deploy
 
 ```bash
-# Set up deployer identity (first time only)
+# 1. Create a funded deployer identity (first time only)
 stellar keys generate testnet_DEPLOYER --network testnet --fund
 
-# Deploy
+# 2. Deploy
 python contracts/deploy_contract.py --deployer-acct testnet_DEPLOYER --network testnet
 ```
 
-The deploy script:
-1. Loads constructor args from `contracts/hvym_freenet_service_args.json`
-2. Uploads WASM: `stellar contract install --wasm [path] --source [deployer] --network [network]`
-3. Resolves the deployer address: `stellar keys address [admin_identity]`
-4. Gets the native XLM SAC address: `stellar contract id asset --asset native --network [network]`
-5. Deploys: `stellar contract deploy --wasm-hash [hash] --source [deployer] --network [network] -- --admin [address] --burn_bps [bps] --token [xlm_address]`
-6. Saves results to `contracts/deployments.json`
-
-### Constructor Args
-
-File: `contracts/hvym_freenet_service_args.json`
+The deploy script reads constructor args from `hvym_freenet_service_args.json`:
 
 ```json
 {
@@ -77,162 +148,81 @@ File: `contracts/hvym_freenet_service_args.json`
 | `admin` | Stellar CLI identity name for the admin role |
 | `burn_bps` | Burn ratio in basis points (3000 = 30%) |
 
-### GitHub CI — Release (`contract-release.yml`)
+It then uploads the WASM, resolves the deployer address and native XLM SAC address, deploys with the constructor args, and saves the result to `contracts/deployments.json`.
 
-**Trigger:** Push tag matching `release-hvym-freenet-service-v*`
+### CI Release (`contract-release.yml`)
 
-**Steps:**
-1. Install Rust + `wasm32-unknown-unknown` target
-2. Install Stellar CLI v22.0.0
-3. `stellar contract build` → `stellar contract optimize`
-4. Copy optimized WASM to `contracts/wasm/`
-5. Create GitHub Release with `hvym_freenet_service.optimized.wasm` attached
+Push a tag to build the optimized WASM and create a GitHub Release:
 
-**Example:**
 ```bash
 git tag release-hvym-freenet-service-v0.1.0
 git push --tags
 ```
 
-### GitHub CI — Deploy (`contract-deploy.yml`)
+**Tag pattern:** `release-hvym-freenet-service-v<version>`
 
-**Trigger:** Push tag matching `deploy-hvym-freenet-service-v*-testnet` or `deploy-hvym-freenet-service-v*-mainnet`
+**What the workflow does:**
+1. Installs Rust + `wasm32-unknown-unknown` + Stellar CLI v22.0.0
+2. Runs `stellar contract build` + `stellar contract optimize`
+3. Creates a GitHub Release with `hvym_freenet_service.optimized.wasm` attached
 
-**Requires:**
-- A prior release build (the workflow downloads the WASM from the matching GitHub Release)
-- `STELLAR_DEPLOYER_SECRET` repository secret (deployer's Stellar secret key)
+### CI Deploy (`contract-deploy.yml`)
 
-**Steps:**
-1. Extract version and network from the tag name
-2. Download `hvym_freenet_service.optimized.wasm` from the corresponding release
-3. Install Stellar CLI v22.0.0
-4. Set up deployer identity from `STELLAR_DEPLOYER_SECRET`
-5. Run `deploy_contract.py`
-6. Commit updated `contracts/deployments.json` to main
+Push a tag to deploy a previously released WASM to Stellar testnet or mainnet:
 
-**Example:**
 ```bash
+# Deploy to testnet
 git tag deploy-hvym-freenet-service-v0.1.0-testnet
+git push --tags
+
+# Deploy to mainnet
+git tag deploy-hvym-freenet-service-v0.1.0-mainnet
 git push --tags
 ```
 
-### Full Release + Deploy Workflow
+**Tag pattern:** `deploy-hvym-freenet-service-v<version>-<network>`
+
+> **Prerequisite:** The matching release tag (`release-hvym-freenet-service-v0.1.0`) must already exist — the deploy workflow downloads the WASM from that GitHub Release.
+
+> **Required secret:** `STELLAR_DEPLOYER_SECRET` must be set in the repository secrets (see [GitHub Repository Setup](#github-repository-setup-required-for-ci) above).
+
+**What the workflow does:**
+1. Downloads `hvym_freenet_service.optimized.wasm` from the matching release
+2. Installs Stellar CLI v22.0.0
+3. Sets up the deployer identity from `STELLAR_DEPLOYER_SECRET`
+4. Runs `deploy_contract.py`
+5. Commits updated `contracts/deployments.json` to `main`
+
+### Full Soroban Release + Deploy Sequence
 
 ```bash
-# 1. Build: CI creates GitHub Release with WASM artifact
+# Step 1: Build — CI creates GitHub Release with WASM artifact
 git tag release-hvym-freenet-service-v0.1.0
 git push --tags
+# Wait for the "Contract Release" workflow to complete...
 
-# 2. Deploy: CI deploys to testnet and commits deployments.json
+# Step 2: Deploy — CI deploys to testnet and commits deployments.json
 git tag deploy-hvym-freenet-service-v0.1.0-testnet
 git push --tags
 ```
 
 ---
 
-## deposit-index (Freenet WASM Contract)
-
-### Local Build
-
-```bash
-python contracts/build_freenet_contract.py --contract deposit-index
-```
-
-**Output:** `contracts/wasm/deposit_index.wasm` (~367 KB)
-
-The crate has aggressive size optimizations in its release profile (`opt-level = "z"`, LTO, single codegen unit, symbol stripping).
-
-Or build directly:
-```bash
-cd contracts/deposit-index
-cargo build --target wasm32-unknown-unknown --release
-```
-
-### Tests
-
-```bash
-cd contracts/deposit-index
-cargo test
-```
-
-19 unit tests covering mock SCP envelopes with real Ed25519 signatures.
-
-### GitHub CI — Release (`freenet-contract-release.yml`)
-
-**Trigger:** Push tag matching `release-deposit-index-v*`
-
-**Example:**
-```bash
-git tag release-deposit-index-v0.1.0
-git push --tags
-```
-
-Creates a GitHub Release with `deposit_index.wasm` attached.
-
-### Deployment
-
-Via `fdev` tool or Freenet node API (contract PUT operation). Deployment requires specifying `DepositIndexParams` containing validator public keys and quorum configuration.
-
----
-
-## datapod (Freenet WASM Contract)
-
-### Local Build
-
-```bash
-python contracts/build_freenet_contract.py --contract datapod
-```
-
-**Output:** `contracts/wasm/datapod_contract.wasm`
-
-Has `freenet.toml` with `[contract] lang = "rust"`.
-
-Or build directly:
-```bash
-cd contracts/datapod
-cargo build --target wasm32-unknown-unknown --release
-```
-
-### GitHub CI — Release (`freenet-contract-release.yml`)
-
-**Trigger:** Push tag matching `release-datapod-v*`
-
-**Example:**
-```bash
-git tag release-datapod-v0.1.0
-git push --tags
-```
-
-Creates a GitHub Release with `datapod_contract.wasm` attached.
-
-### Deployment
-
-Via `fdev` tool or Freenet node API. Each instance uses different `DatapodParams` (creator pubkey, recipient pubkey) to produce a unique `ContractKey`.
-
----
-
-## Directory Structure
+## Directory Layout
 
 ```
 contracts/
-├── hvym-freenet-service/              # Soroban contract (standalone crate)
-├── deposit-index/                     # Freenet WASM contract (standalone crate)
-├── datapod/                           # Freenet WASM contract (standalone crate)
-├── wasm/                              # Build output directory
-├── build_contract.py                  # Build hvym-freenet-service (Soroban)
-├── build_freenet_contract.py          # Build Freenet WASM contracts (deposit-index, datapod)
-├── deploy_contract.py                 # Deploy hvym-freenet-service
-├── hvym_freenet_service_args.json     # Constructor args
-├── deployments.json                   # Deployment tracking (generated by deploy)
-└── STELLAR_CONTRACTS.md               # This file
+├── hvym-freenet-service/              # Soroban contract crate
+├── deposit-index/                     # Freenet WASM contract crate
+├── datapod/                           # Freenet WASM contract crate
+├── wasm/                              # Built WASM output (committed by CI)
+├── build_contract.py                  # Build script — hvym-freenet-service (Soroban)
+├── build_freenet_contract.py          # Build script — Freenet WASM contracts
+├── deploy_contract.py                 # Deploy script — hvym-freenet-service (Soroban)
+├── hvym_freenet_service_args.json     # Soroban constructor args
+├── deployments.json                   # Soroban deployment records (committed by CI)
+└── BUILD&DEPLOY.md                    # This file
 ```
-
-## Environment Variables & Secrets
-
-| Variable / Secret | Scope | Purpose |
-|-------------------|-------|---------|
-| `STELLAR_DEPLOYER_SECRET` | GitHub Actions secret | Deployer Stellar secret key |
-| `GITHUB_TOKEN` | Auto-provided by GitHub | Release creation, WASM download |
 
 ## Architecture Docs
 
