@@ -1,0 +1,49 @@
+name: Freenet Contract Release
+
+on:
+  push:
+    tags:
+      - 'release-deposit-index-v*'
+      - 'release-datapod-v*'
+
+jobs:
+  build:
+    name: Build & Release Freenet WASM Contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract contract name from tag
+        id: meta
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          # Strip "release-" prefix and "-vX.Y.Z" suffix to get contract dir name
+          CONTRACT=$(echo "$TAG" | sed 's/^release-//;s/-v[0-9].*//')
+          echo "contract=$CONTRACT" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Build contract
+        run: python3 contracts/build_freenet_contract.py --contract ${{ steps.meta.outputs.contract }}
+
+      - name: Commit WASM to repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add contracts/wasm/
+          git diff --staged --quiet || \
+            git commit -m "build: update ${{ steps.meta.outputs.contract }} WASM for ${GITHUB_REF_NAME}"
+          git push origin HEAD:main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: contracts/wasm/*.wasm
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
