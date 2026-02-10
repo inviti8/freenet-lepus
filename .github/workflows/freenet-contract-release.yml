@@ -6,6 +6,9 @@ on:
       - 'release-deposit-index-v*'
       - 'release-datapod-v*'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build & Release Freenet WASM Contract

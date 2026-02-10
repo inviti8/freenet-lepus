@@ -231,21 +231,22 @@ During SUBSCRIBE, the subscriber proves key ownership:
 |----------|-------------|---------|---------|
 | `LEPUS_DEPOSIT_INDEX_KEY` | All lepus nodes | Hex 32-byte deposit-index `ContractInstanceId` | `a1b2c3...` (64 hex chars) |
 | `LEPUS_DEPOSIT_INDEX_CODE_HASH` | Relayer nodes | Hex 32-byte deposit-index `CodeHash` | `d4e5f6...` (64 hex chars) |
-| `LEPUS_RPC_URL` | Relayer nodes | Stellar RPC endpoint for fetching SCP proofs | `https://horizon-testnet.stellar.org` |
+| `LEPUS_RPC_URL` | Relayer nodes | Stellar Soroban RPC endpoint for fetching SCP proofs | `https://soroban-testnet.stellar.org` |
+| `LEPUS_SOROBAN_CONTRACT_ID` | Relayer nodes | Stellar StrKey for hvym-freenet-service Soroban contract | `CD3KT3NS3GMAQTTNVS5HIMV7Q6ISZNRIFXF7LIOMUOC5JC5VMG4UVOHQ` |
 | `LEPUS_POLL_INTERVAL_SECS` | Relayer nodes | Relayer poll interval (seconds) | `60` |
 | `LEPUS_STELLAR_PUBKEY` | Identity verification | Node's Ed25519 public key (hex, 32 bytes) | `a1b2c3...` (64 hex chars) |
 | `LEPUS_STELLAR_SECRET` | Transport key derivation | Node's Ed25519 secret key (hex, 32 bytes) | `d4e5f6...` (64 hex chars) |
 
 **Node roles:**
 - **Subscriber** (all lepus nodes): Set `LEPUS_DEPOSIT_INDEX_KEY`. The node subscribes to the deposit-index contract and receives commitment updates automatically.
-- **Relayer** (nodes with Stellar access): Also set `LEPUS_RPC_URL` and `LEPUS_DEPOSIT_INDEX_CODE_HASH`. The node fetches SCP proofs from Stellar and submits them to the deposit-index contract.
+- **Relayer** (nodes with Stellar access): Also set `LEPUS_RPC_URL`, `LEPUS_SOROBAN_CONTRACT_ID`, and `LEPUS_DEPOSIT_INDEX_CODE_HASH`. The node fetches SCP proofs from Stellar and submits them to the deposit-index contract.
 
 ### Feature Flag
 
 ```toml
 # crates/core/Cargo.toml
 [features]
-lepus = ["ordered-float", "ed25519-dalek"]
+lepus = ["ordered-float", "ed25519-dalek", "stellar-xdr", "base64"]
 ```
 
 All CWP code is behind `#[cfg(feature = "lepus")]`. When disabled, the crate compiles and behaves exactly as upstream Freenet.

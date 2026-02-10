@@ -79,6 +79,8 @@ x25519-dalek = { workspace = true }
 sha2 = "0.10"
 ordered-float = { version = "4", optional = true }
 ed25519-dalek = { version = "2", optional = true, features = ["std"] }
+stellar-xdr = { version = "=24.0.1", default-features = false, features = ["curr", "std"], optional = true }
+base64 = { version = "0.13", optional = true }
 
 # Tracing deps
 opentelemetry = "0.31"
@@ -179,7 +181,7 @@ bench_full = []  # Enables full benchmark suite (slow, ~78 min)
 simulation_tests = []
 # Feature to enable nightly-only tests (long-running, resource-intensive)
 nightly_tests = []
-lepus = ["ordered-float", "ed25519-dalek"]
+lepus = ["ordered-float", "ed25519-dalek", "stellar-xdr", "base64"]
 
 # ==============================================================================
 # Lint Configuration

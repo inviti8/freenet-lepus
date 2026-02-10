@@ -21,6 +21,59 @@ use crate::config::{GlobalExecutor, GlobalRng};
 use crate::ring::Ring;
 
 // =============================================================================
+// RPC response types (Soroban JSON-RPC)
+// =============================================================================
+
+#[cfg(feature = "lepus")]
+mod rpc {
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    pub struct JsonRpcResponse<T> {
+        pub result: Option<T>,
+        pub error: Option<JsonRpcError>,
+    }
+
+    #[derive(Deserialize)]
+    pub struct JsonRpcError {
+        pub code: i64,
+        pub message: String,
+    }
+
+    #[derive(Deserialize)]
+    pub struct GetEventsResult {
+        pub events: Vec<EventEntry>,
+        #[serde(rename = "latestLedger")]
+        #[allow(dead_code)]
+        pub latest_ledger: String,
+    }
+
+    #[derive(Deserialize)]
+    pub struct EventEntry {
+        pub ledger: u32,
+    }
+
+    #[derive(Deserialize)]
+    pub struct GetLedgersResult {
+        pub ledgers: Vec<LedgerEntry>,
+    }
+
+    #[derive(Deserialize)]
+    pub struct LedgerEntry {
+        #[allow(dead_code)]
+        pub sequence: u32,
+        #[serde(rename = "metadataXdr")]
+        pub metadata_xdr: String,
+    }
+
+    #[derive(Deserialize)]
+    pub struct GetHealthResult {
+        #[serde(rename = "latestLedger")]
+        pub latest_ledger: u32,
+    }
+}
+
+// =============================================================================
 // Configuration
 // =============================================================================
 
@@ -31,6 +84,8 @@ pub struct OracleConfig {
     pub rpc_url: String,
     /// Hex 32-byte deposit-index ContractInstanceId.
     pub deposit_index_key: Option<String>,
+    /// Stellar StrKey contract ID (e.g. "CD3KT3NS..."), required for relayer.
+    pub soroban_contract_id: Option<String>,
     /// How often to poll for new Stellar ledgers (relayer mode).
     pub poll_interval: Duration,
     /// HTTP request timeout.
@@ -42,6 +97,7 @@ impl Default for OracleConfig {
         Self {
             rpc_url: String::new(),
             deposit_index_key: None,
+            soroban_contract_id: None,
             poll_interval: Duration::from_secs(60),
             http_timeout: Duration::from_secs(10),
         }
@@ -61,6 +117,11 @@ impl OracleConfig {
                 config.deposit_index_key = Some(key.trim().to_string());
             }
         }
+        if let Ok(id) = std::env::var("LEPUS_SOROBAN_CONTRACT_ID") {
+            if !id.trim().is_empty() {
+                config.soroban_contract_id = Some(id.trim().to_string());
+            }
+        }
         if let Ok(secs) = std::env::var("LEPUS_POLL_INTERVAL_SECS") {
             if let Ok(v) = secs.parse::<u64>() {
                 config.poll_interval = Duration::from_secs(v);
@@ -75,9 +136,11 @@ impl OracleConfig {
         self.deposit_index_key.is_some()
     }
 
-    /// Whether this node can relay Stellar proofs (subscriber + RPC access).
+    /// Whether this node can relay Stellar proofs (subscriber + RPC access + contract ID).
     pub fn is_relayer_configured(&self) -> bool {
-        self.deposit_index_key.is_some() && !self.rpc_url.is_empty()
+        self.deposit_index_key.is_some()
+            && !self.rpc_url.is_empty()
+            && self.soroban_contract_id.is_some()
     }
 }
 
@@ -87,7 +150,7 @@ impl OracleConfig {
 
 /// Errors from the oracle / Stellar proof source.
 #[derive(Debug, thiserror::Error)]
-#[allow(dead_code)] // Variants used by MockStellarProofSource (test cfg) and future RPC impl
+#[allow(dead_code)] // Variants used by MockStellarProofSource (test cfg) and RPC impl
 pub enum OracleError {
     #[error("RPC request failed: {0}")]
     RpcError(#[from] reqwest::Error),
@@ -124,17 +187,16 @@ pub trait StellarProofSource: Send + Sync + 'static {
 }
 
 // =============================================================================
-// Production Stub: StellarProofRelayer
+// Production: StellarProofRelayer
 // =============================================================================
 
-/// Production data source that will query Stellar Horizon / RPC for proofs.
-///
-/// Currently a stub that returns empty results. The actual RPC calls will be
-/// implemented once the hvym-freenet-service contract is deployed on testnet.
+/// ScVal::Symbol("DEPOSIT") encoded as base64 XDR, used as topic filter.
+#[cfg(feature = "lepus")]
+const DEPOSIT_TOPIC_XDR_B64: &str = "AAAADwAAAAdERVBPU0lUAA==";
+
+/// Production data source that queries Stellar Soroban RPC for proofs.
 pub struct StellarProofRelayer {
-    #[allow(dead_code)]
     client: reqwest::Client,
-    #[allow(dead_code)]
     config: OracleConfig,
 }
 
@@ -149,22 +211,293 @@ impl StellarProofRelayer {
             config: config.clone(),
         })
     }
+
+    /// Call `getHealth` to discover the latest ledger on the RPC node.
+    #[cfg(feature = "lepus")]
+    async fn get_latest_ledger(&self) -> Result<u32, OracleError> {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getHealth",
+            "params": {}
+        });
+
+        let resp = self
+            .client
+            .post(&self.config.rpc_url)
+            .json(&body)
+            .send()
+            .await?
+            .json::<rpc::JsonRpcResponse<rpc::GetHealthResult>>()
+            .await?;
+
+        if let Some(err) = resp.error {
+            return Err(OracleError::ParseError(format!(
+                "getHealth error {}: {}",
+                err.code, err.message
+            )));
+        }
+
+        resp.result
+            .map(|r| r.latest_ledger)
+            .ok_or_else(|| OracleError::ParseError("getHealth: no result".into()))
+    }
+
+    /// Query `getEvents` for DEPOSIT events from the Soroban contract.
+    #[cfg(feature = "lepus")]
+    async fn query_events_rpc(&self, start_ledger: u32) -> Result<Vec<u32>, OracleError> {
+        let contract_id = self
+            .config
+            .soroban_contract_id
+            .as_deref()
+            .ok_or(OracleError::NotConfigured)?;
+
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getEvents",
+            "params": {
+                "startLedger": start_ledger,
+                "filters": [{
+                    "type": "contract",
+                    "contractIds": [contract_id],
+                    "topics": [[DEPOSIT_TOPIC_XDR_B64, "*"]]
+                }],
+                "pagination": { "limit": 10000 }
+            }
+        });
+
+        let resp = self
+            .client
+            .post(&self.config.rpc_url)
+            .json(&body)
+            .send()
+            .await?
+            .json::<rpc::JsonRpcResponse<rpc::GetEventsResult>>()
+            .await?;
+
+        if let Some(err) = &resp.error {
+            // If startLedger is before the oldest available, we get an error.
+            // Return empty so the caller can retry from a newer ledger.
+            if err.message.contains("start is before oldest ledger") {
+                return Err(OracleError::ParseError(err.message.clone()));
+            }
+            return Err(OracleError::ParseError(format!(
+                "getEvents error {}: {}",
+                err.code, err.message
+            )));
+        }
+
+        let events = resp
+            .result
+            .map(|r| r.events)
+            .unwrap_or_default();
+
+        // Deduplicate ledger sequences (multiple events in same ledger)
+        let mut ledgers: Vec<u32> = events.iter().map(|e| e.ledger).collect();
+        ledgers.sort();
+        ledgers.dedup();
+        Ok(ledgers)
+    }
+
+    /// Fetch `LedgerCloseMeta` via `getLedgers` and extract proof components.
+    #[cfg(feature = "lepus")]
+    async fn fetch_ledger_proof(&self, ledger_seq: u32) -> Result<DepositProof, OracleError> {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getLedgers",
+            "params": {
+                "startLedger": ledger_seq,
+                "pagination": { "limit": 1 }
+            }
+        });
+
+        let resp = self
+            .client
+            .post(&self.config.rpc_url)
+            .json(&body)
+            .send()
+            .await?
+            .json::<rpc::JsonRpcResponse<rpc::GetLedgersResult>>()
+            .await?;
+
+        if let Some(err) = resp.error {
+            return Err(OracleError::ParseError(format!(
+                "getLedgers error {}: {}",
+                err.code, err.message
+            )));
+        }
+
+        let ledgers = resp
+            .result
+            .map(|r| r.ledgers)
+            .unwrap_or_default();
+
+        let entry = ledgers
+            .into_iter()
+            .next()
+            .ok_or_else(|| OracleError::ParseError(format!("no ledger data for {ledger_seq}")))?;
+
+        Self::extract_proof(ledger_seq, &entry.metadata_xdr)
+    }
+
+    /// Parse `LedgerCloseMeta` XDR and extract SCP envelopes, tx set, and result metas.
+    #[cfg(feature = "lepus")]
+    fn extract_proof(ledger_seq: u32, metadata_xdr_b64: &str) -> Result<DepositProof, OracleError> {
+        use stellar_xdr::curr::{LedgerCloseMeta, ReadXdr, WriteXdr, Limits};
+
+        let meta_bytes = base64::decode(metadata_xdr_b64)
+            .map_err(|e| OracleError::ParseError(format!("base64 decode: {e}")))?;
+
+        let lcm = LedgerCloseMeta::from_xdr(meta_bytes, Limits::none())
+            .map_err(|e| OracleError::ParseError(format!("XDR decode LedgerCloseMeta: {e}")))?;
+
+        // Helper: extract SCP envelopes from scp_info
+        fn extract_scp_envelopes(
+            scp_info: &stellar_xdr::curr::VecM<stellar_xdr::curr::ScpHistoryEntry>,
+            ledger_seq: u32,
+        ) -> Result<Vec<String>, OracleError> {
+            let mut envelopes = Vec::new();
+            for hist_entry in scp_info.iter() {
+                let stellar_xdr::curr::ScpHistoryEntry::V0(v0_hist) = hist_entry;
+                // messages is VecM<ScpEnvelope> — already the right type
+                for envelope in v0_hist.ledger_messages.messages.iter() {
+                    let env_xdr = envelope
+                        .to_xdr(Limits::none())
+                        .map_err(|e| {
+                            OracleError::ParseError(format!("scp_envelope XDR: {e}"))
+                        })?;
+                    envelopes.push(base64::encode(&env_xdr));
+                }
+            }
+            if envelopes.is_empty() {
+                tracing::warn!(
+                    ledger_seq,
+                    "SCP data not available in LedgerCloseMeta; \
+                     the RPC endpoint may not include consensus data"
+                );
+            }
+            Ok(envelopes)
+        }
+
+        // Helper: encode a slice of WriteXdr items as base64 XDR strings
+        fn encode_xdr_vec<T: WriteXdr>(
+            items: &stellar_xdr::curr::VecM<T>,
+        ) -> Result<Vec<String>, OracleError> {
+            items
+                .iter()
+                .map(|item| {
+                    let xdr = item.to_xdr(Limits::none())?;
+                    Ok(base64::encode(&xdr))
+                })
+                .collect::<Result<_, stellar_xdr::curr::Error>>()
+                .map_err(|e| OracleError::ParseError(format!("tx_result_meta XDR: {e}")))
+        }
+
+        // Extract components based on the LedgerCloseMeta variant
+        match lcm {
+            LedgerCloseMeta::V0(v0) => {
+                let tx_set_xdr = v0
+                    .tx_set
+                    .to_xdr(Limits::none())
+                    .map_err(|e| OracleError::ParseError(format!("tx_set XDR: {e}")))?;
+
+                Ok(DepositProof {
+                    ledger_seq,
+                    scp_envelopes: extract_scp_envelopes(&v0.scp_info, ledger_seq)?,
+                    transaction_set: base64::encode(&tx_set_xdr),
+                    tx_result_metas: encode_xdr_vec(&v0.tx_processing)?,
+                })
+            }
+            LedgerCloseMeta::V1(v1) => {
+                let tx_set_xdr = v1
+                    .tx_set
+                    .to_xdr(Limits::none())
+                    .map_err(|e| OracleError::ParseError(format!("tx_set XDR: {e}")))?;
+
+                Ok(DepositProof {
+                    ledger_seq,
+                    scp_envelopes: extract_scp_envelopes(&v1.scp_info, ledger_seq)?,
+                    transaction_set: base64::encode(&tx_set_xdr),
+                    tx_result_metas: encode_xdr_vec(&v1.tx_processing)?,
+                })
+            }
+            LedgerCloseMeta::V2(v2) => {
+                let tx_set_xdr = v2
+                    .tx_set
+                    .to_xdr(Limits::none())
+                    .map_err(|e| OracleError::ParseError(format!("tx_set XDR: {e}")))?;
+
+                Ok(DepositProof {
+                    ledger_seq,
+                    scp_envelopes: extract_scp_envelopes(&v2.scp_info, ledger_seq)?,
+                    transaction_set: base64::encode(&tx_set_xdr),
+                    tx_result_metas: encode_xdr_vec(&v2.tx_processing)?,
+                })
+            }
+        }
+    }
 }
 
 impl StellarProofSource for StellarProofRelayer {
     fn query_deposit_events(
         &self,
-        _since_ledger: u32,
+        since_ledger: u32,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u32>, OracleError>> + Send + '_>> {
-        // Stub: returns empty until Soroban contract is deployed.
-        Box::pin(async { Ok(Vec::new()) })
+        Box::pin(async move {
+            #[cfg(feature = "lepus")]
+            {
+                let start = if since_ledger == 0 {
+                    // Cold start: get latest ledger and look back 200 ledgers
+                    let latest = self.get_latest_ledger().await?;
+                    latest.saturating_sub(200).max(1)
+                } else {
+                    since_ledger + 1
+                };
+
+                match self.query_events_rpc(start).await {
+                    Ok(ledgers) => Ok(ledgers),
+                    Err(OracleError::ParseError(msg))
+                        if msg.contains("start is before oldest ledger") =>
+                    {
+                        // Retry from a recent ledger
+                        let latest = self.get_latest_ledger().await?;
+                        let retry_start = latest.saturating_sub(200).max(1);
+                        tracing::info!(
+                            retry_start,
+                            "startLedger was too old, retrying from recent ledger"
+                        );
+                        self.query_events_rpc(retry_start).await
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+
+            #[cfg(not(feature = "lepus"))]
+            {
+                let _ = since_ledger;
+                Ok(Vec::new())
+            }
+        })
     }
 
     fn fetch_proof_for_ledger(
         &self,
-        _ledger_seq: u32,
+        ledger_seq: u32,
     ) -> Pin<Box<dyn Future<Output = Result<DepositProof, OracleError>> + Send + '_>> {
-        Box::pin(async { Err(OracleError::NotConfigured) })
+        Box::pin(async move {
+            #[cfg(feature = "lepus")]
+            {
+                self.fetch_ledger_proof(ledger_seq).await
+            }
+
+            #[cfg(not(feature = "lepus"))]
+            {
+                let _ = ledger_seq;
+                Err(OracleError::NotConfigured)
+            }
+        })
     }
 }
 
@@ -499,6 +832,7 @@ mod tests {
         let config = OracleConfig::default();
         assert!(config.rpc_url.is_empty());
         assert!(config.deposit_index_key.is_none());
+        assert!(config.soroban_contract_id.is_none());
         assert_eq!(config.poll_interval, Duration::from_secs(60));
         assert_eq!(config.http_timeout, Duration::from_secs(10));
         assert!(!config.is_subscriber_configured());
@@ -513,6 +847,7 @@ mod tests {
         );
         // Remove RPC URL to ensure relayer is not configured
         std::env::remove_var("LEPUS_RPC_URL");
+        std::env::remove_var("LEPUS_SOROBAN_CONTRACT_ID");
 
         let config = OracleConfig::from_env();
         assert!(config.is_subscriber_configured());
@@ -522,22 +857,49 @@ mod tests {
     }
 
     #[test]
+    fn test_oracle_config_relayer_needs_contract_id() {
+        std::env::set_var(
+            "LEPUS_DEPOSIT_INDEX_KEY",
+            "0102030405060708091011121314151617181920212223242526272829303132",
+        );
+        std::env::set_var("LEPUS_RPC_URL", "https://soroban-testnet.stellar.org");
+        std::env::remove_var("LEPUS_SOROBAN_CONTRACT_ID");
+
+        let config = OracleConfig::from_env();
+        assert!(config.is_subscriber_configured());
+        // Relayer NOT configured without contract ID
+        assert!(!config.is_relayer_configured());
+
+        std::env::remove_var("LEPUS_DEPOSIT_INDEX_KEY");
+        std::env::remove_var("LEPUS_RPC_URL");
+    }
+
+    #[test]
     fn test_oracle_config_relayer() {
         std::env::set_var(
             "LEPUS_DEPOSIT_INDEX_KEY",
             "0102030405060708091011121314151617181920212223242526272829303132",
         );
-        std::env::set_var("LEPUS_RPC_URL", "https://horizon-testnet.stellar.org");
+        std::env::set_var("LEPUS_RPC_URL", "https://soroban-testnet.stellar.org");
+        std::env::set_var(
+            "LEPUS_SOROBAN_CONTRACT_ID",
+            "CD3KT3NS3GMAQTTNVS5HIMV7Q6ISZNRIFXF7LIOMUOC5JC5VMG4UVOHQ",
+        );
         std::env::set_var("LEPUS_POLL_INTERVAL_SECS", "30");
 
         let config = OracleConfig::from_env();
         assert!(config.is_subscriber_configured());
         assert!(config.is_relayer_configured());
-        assert_eq!(config.rpc_url, "https://horizon-testnet.stellar.org");
+        assert_eq!(config.rpc_url, "https://soroban-testnet.stellar.org");
+        assert_eq!(
+            config.soroban_contract_id.as_deref(),
+            Some("CD3KT3NS3GMAQTTNVS5HIMV7Q6ISZNRIFXF7LIOMUOC5JC5VMG4UVOHQ")
+        );
         assert_eq!(config.poll_interval, Duration::from_secs(30));
 
         std::env::remove_var("LEPUS_DEPOSIT_INDEX_KEY");
         std::env::remove_var("LEPUS_RPC_URL");
+        std::env::remove_var("LEPUS_SOROBAN_CONTRACT_ID");
         std::env::remove_var("LEPUS_POLL_INTERVAL_SECS");
     }
 
@@ -605,10 +967,90 @@ mod tests {
         let config = OracleConfig {
             rpc_url: "https://example.com".to_string(),
             deposit_index_key: Some("abc".to_string()),
+            soroban_contract_id: Some("CD3KT3NS...".to_string()),
             poll_interval: Duration::from_secs(60),
             http_timeout: Duration::from_secs(10),
         };
         let relayer = StellarProofRelayer::new(&config);
         assert!(relayer.is_ok());
+    }
+
+    #[test]
+    fn test_parse_get_events_response() {
+        let json = r#"{
+            "result": {
+                "events": [
+                    {"ledger": 100, "type": "contract"},
+                    {"ledger": 100, "type": "contract"},
+                    {"ledger": 200, "type": "contract"}
+                ],
+                "latestLedger": "300"
+            }
+        }"#;
+
+        let resp: rpc::JsonRpcResponse<rpc::GetEventsResult> =
+            serde_json::from_str(json).unwrap();
+        assert!(resp.error.is_none());
+        let result = resp.result.unwrap();
+        assert_eq!(result.events.len(), 3);
+        assert_eq!(result.events[0].ledger, 100);
+        assert_eq!(result.events[2].ledger, 200);
+
+        // Verify deduplication logic
+        let mut ledgers: Vec<u32> = result.events.iter().map(|e| e.ledger).collect();
+        ledgers.sort();
+        ledgers.dedup();
+        assert_eq!(ledgers, vec![100, 200]);
+    }
+
+    #[test]
+    fn test_parse_get_ledgers_response() {
+        let json = r#"{
+            "result": {
+                "ledgers": [
+                    {"sequence": 42, "metadataXdr": "AAAA"}
+                ]
+            }
+        }"#;
+
+        let resp: rpc::JsonRpcResponse<rpc::GetLedgersResult> =
+            serde_json::from_str(json).unwrap();
+        assert!(resp.error.is_none());
+        let result = resp.result.unwrap();
+        assert_eq!(result.ledgers.len(), 1);
+        assert_eq!(result.ledgers[0].sequence, 42);
+        assert_eq!(result.ledgers[0].metadata_xdr, "AAAA");
+    }
+
+    #[test]
+    fn test_parse_get_health_response() {
+        let json = r#"{
+            "result": {
+                "status": "healthy",
+                "latestLedger": 12345
+            }
+        }"#;
+
+        let resp: rpc::JsonRpcResponse<rpc::GetHealthResult> =
+            serde_json::from_str(json).unwrap();
+        let result = resp.result.unwrap();
+        assert_eq!(result.latest_ledger, 12345);
+    }
+
+    #[test]
+    fn test_parse_rpc_error_response() {
+        let json = r#"{
+            "error": {
+                "code": -32600,
+                "message": "start is before oldest ledger"
+            }
+        }"#;
+
+        let resp: rpc::JsonRpcResponse<rpc::GetEventsResult> =
+            serde_json::from_str(json).unwrap();
+        assert!(resp.result.is_none());
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, -32600);
+        assert!(err.message.contains("start is before oldest ledger"));
     }
 }
