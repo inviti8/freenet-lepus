@@ -1210,12 +1210,15 @@ async fn update_contract(
             let new_bytes = State::from(new_val.clone()).into_bytes();
             let summary = StateSummary::from(new_bytes);
 
-            // Lepus: verify identity envelope and update hosting cache
+            // Lepus: verify identity envelope and check deposit-index updates
             #[cfg(feature = "lepus")]
             {
                 op_manager
                     .ring
                     .verify_and_update_identity(&key, new_val.as_ref());
+                op_manager
+                    .ring
+                    .check_deposit_index_update(&key, new_val.as_ref());
             }
 
             Ok(UpdateExecution {

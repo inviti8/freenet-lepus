@@ -29,6 +29,8 @@
 
 mod cache;
 #[cfg(feature = "lepus")]
+pub(crate) mod deposit_index;
+#[cfg(feature = "lepus")]
 pub(crate) mod identity;
 #[cfg(feature = "lepus")]
 pub(crate) mod oracle;

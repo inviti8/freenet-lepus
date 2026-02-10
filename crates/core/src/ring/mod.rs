@@ -990,6 +990,22 @@ impl Ring {
             .verify_and_update_identity(key, state_bytes)
     }
 
+    /// Check if a contract update is the deposit-index contract and feed
+    /// deposit data into CWP commitment scores for hosted contracts.
+    #[cfg(feature = "lepus")]
+    pub fn check_deposit_index_update(&self, key: &ContractKey, state_bytes: &[u8]) {
+        let hosted_keys = self.hosted_contract_keys();
+        let now = tokio::time::Instant::now();
+        hosting::deposit_index::check_deposit_index_update(
+            key,
+            state_bytes,
+            &hosted_keys,
+            |updates| {
+                self.update_commitments_batch(updates, now);
+            },
+        );
+    }
+
     /// Update subscriber identity from subscription handshake.
     #[cfg(feature = "lepus")]
     pub fn update_subscriber_identity(
