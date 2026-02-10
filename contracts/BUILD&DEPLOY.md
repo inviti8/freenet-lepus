@@ -40,9 +40,9 @@ Go to **Settings > Secrets and variables > Actions > Repository secrets** and ad
   rustup target add wasm32-unknown-unknown
   ```
 - **Python 3** — for build/deploy scripts
-- **Stellar CLI v22.0.0** — only needed for hvym-freenet-service:
+- **Stellar CLI v22.0.0** — only needed for hvym-freenet-service (the `opt` feature enables `stellar contract optimize`):
   ```bash
-  cargo install stellar-cli --version 22.0.0 --locked
+  cargo install stellar-cli --version 22.0.0 --locked --features opt
   ```
 
 ---
@@ -79,8 +79,16 @@ cd contracts/datapod && cargo test
 
 ### CI Release (`freenet-contract-release.yml`)
 
-Push a tag to build, commit the WASM to `contracts/wasm/` on `main`, and create a GitHub Release:
+**Trigger:** Push tag matching `release-deposit-index-v*` or `release-datapod-v*`
 
+**Steps:**
+1. Extracts the contract directory name from the tag
+2. Installs Rust + `wasm32-unknown-unknown` target
+3. Runs `build_freenet_contract.py --contract <name>`
+4. Commits the built WASM to `contracts/wasm/` on `main`
+5. Creates a GitHub Release with the WASM attached
+
+**Example:**
 ```bash
 # deposit-index
 git tag release-deposit-index-v0.1.0
@@ -90,15 +98,6 @@ git push --tags
 git tag release-datapod-v0.1.0
 git push --tags
 ```
-
-**Tag pattern:** `release-<contract-name>-v<version>` (e.g., `release-deposit-index-v0.1.0`)
-
-**What the workflow does:**
-1. Extracts the contract directory name from the tag
-2. Installs Rust + `wasm32-unknown-unknown` target
-3. Runs `build_freenet_contract.py --contract <name>`
-4. Commits the built WASM to `contracts/wasm/` on `main`
-5. Creates a GitHub Release with the WASM attached
 
 ### Deployment to Freenet
 
@@ -152,24 +151,36 @@ It then uploads the WASM, resolves the deployer address and native XLM SAC addre
 
 ### CI Release (`contract-release.yml`)
 
-Push a tag to build the optimized WASM and create a GitHub Release:
+**Trigger:** Push tag matching `release-hvym-freenet-service-v*`
 
+**Steps:**
+1. Installs Rust + `wasm32-unknown-unknown` + Stellar CLI v22.0.0
+2. Runs `stellar contract build` + `stellar contract optimize`
+3. Creates a GitHub Release with `hvym_freenet_service.optimized.wasm` attached
+
+**Example:**
 ```bash
 git tag release-hvym-freenet-service-v0.1.0
 git push --tags
 ```
 
-**Tag pattern:** `release-hvym-freenet-service-v<version>`
-
-**What the workflow does:**
-1. Installs Rust + `wasm32-unknown-unknown` + Stellar CLI v22.0.0
-2. Runs `stellar contract build` + `stellar contract optimize`
-3. Creates a GitHub Release with `hvym_freenet_service.optimized.wasm` attached
-
 ### CI Deploy (`contract-deploy.yml`)
 
-Push a tag to deploy a previously released WASM to Stellar testnet or mainnet:
+**Trigger:** Push tag matching `deploy-hvym-freenet-service-v*-testnet` or `deploy-hvym-freenet-service-v*-mainnet`
 
+**Requires:**
+- A prior release build — the deploy workflow downloads the WASM from the matching GitHub Release
+- `STELLAR_DEPLOYER_SECRET` repository secret (see [GitHub Repository Setup](#github-repository-setup-required-for-ci))
+
+**Steps:**
+1. Extracts version and network from the tag name
+2. Downloads `hvym_freenet_service.optimized.wasm` from the corresponding release
+3. Installs Stellar CLI v22.0.0
+4. Sets up deployer identity from `STELLAR_DEPLOYER_SECRET`
+5. Runs `deploy_contract.py`
+6. Commits updated `contracts/deployments.json` to `main`
+
+**Example:**
 ```bash
 # Deploy to testnet
 git tag deploy-hvym-freenet-service-v0.1.0-testnet
@@ -179,19 +190,6 @@ git push --tags
 git tag deploy-hvym-freenet-service-v0.1.0-mainnet
 git push --tags
 ```
-
-**Tag pattern:** `deploy-hvym-freenet-service-v<version>-<network>`
-
-> **Prerequisite:** The matching release tag (`release-hvym-freenet-service-v0.1.0`) must already exist — the deploy workflow downloads the WASM from that GitHub Release.
-
-> **Required secret:** `STELLAR_DEPLOYER_SECRET` must be set in the repository secrets (see [GitHub Repository Setup](#github-repository-setup-required-for-ci) above).
-
-**What the workflow does:**
-1. Downloads `hvym_freenet_service.optimized.wasm` from the matching release
-2. Installs Stellar CLI v22.0.0
-3. Sets up the deployer identity from `STELLAR_DEPLOYER_SECRET`
-4. Runs `deploy_contract.py`
-5. Commits updated `contracts/deployments.json` to `main`
 
 ### Full Soroban Release + Deploy Sequence
 
