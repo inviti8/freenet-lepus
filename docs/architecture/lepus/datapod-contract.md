@@ -199,3 +199,4 @@ If `LEPUS_STELLAR_SECRET` is not set, the node falls back to a random transport 
 
 - [Lepus Overview](README.md) — CWP scoring and architecture
 - [Stellar Contract](stellar-contract.md) — Soroban deposit contract
+- [Deposit-Index Contract](deposit-index-contract.md) — Freenet WASM contract for SCP-verified deposits

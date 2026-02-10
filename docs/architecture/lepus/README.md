@@ -24,23 +24,28 @@ flowchart TB
     subgraph Node["Freenet Node"]
         WS["WebSocket API"]
         Ops["Operations<br/>(PUT / GET / UPDATE / SUBSCRIBE)"]
+        DepIdx["Deposit-Index<br/>WASM Contract"]
     end
 
     subgraph Ring["Ring Module"]
         HM["HostingManager"]
         HC["HostingCache<br/>(CWP Scoring)"]
-        Oracle["OracleWorker<br/>(Background Poller)"]
+        Oracle["OracleWorker<br/>(Subscriber + Relayer)"]
         Identity["Identity Verifier<br/>(Ed25519 Envelope)"]
+        DepHook["Deposit Index Hook<br/>(check_deposit_index_update)"]
     end
 
     Andromica -->|"JSON state via WS"| WS
     WS --> Ops
     Ops -->|"verify_and_update_identity"| HM
     Ops -->|"record_bytes_served/consumed"| HM
+    Ops -->|"check_deposit_index_update"| DepHook
     HM --> HC
-    Oracle -->|"poll deposits"| Soroban
-    Oracle -->|"update_commitments_batch"| HM
+    Oracle -->|"subscribe to deposit-index"| DepIdx
+    Oracle -->|"relay SCP proofs<br/>(relayer nodes only)"| Soroban
+    DepHook -->|"update_commitments_batch"| HM
     Identity -->|"verify_identity"| HC
+    DepIdx -->|"state updates via subscription"| Ops
 
     style External fill:#e3f2fd,stroke:#1976d2
     style Node fill:#e8f5e9,stroke:#388e3c
@@ -154,36 +159,55 @@ When a GET operation serves or receives contract state:
 - Bytes served: `crates/core/src/operations/get.rs:965-970`
 - Bytes consumed: `crates/core/src/operations/get.rs:1696-1700`
 
-### Oracle Poll Cycle (Commitment Updates)
+### Deposit-Index Subscription (Commitment Updates)
 
-The `OracleWorker` runs as a background task, polling Stellar/Soroban for XLM deposits:
+Commitment scores are fed by subscribing to the **deposit-index Freenet contract** — a WASM contract that maintains a verified map of XLM deposits per Freenet contract. This replaces the original direct Soroban polling design.
+
+The `OracleWorker` runs as a background task with two modes:
 
 ```mermaid
 sequenceDiagram
     participant O as OracleWorker
-    participant S as Soroban RPC
-    participant C as CommitmentCache
+    participant Sub as Subscriber
+    participant Rel as Relayer
+    participant DI as Deposit-Index Contract
+    participant S as Stellar RPC
     participant R as Ring
 
-    loop Every poll_interval (60s)
-        O->>R: hosted_contract_keys()
-        R-->>O: [ContractKey, ...]
-        O->>S: query_deposits(keys)
-        alt Success
-            S-->>O: [CommitmentRecord, ...]
-            O->>C: update(records, ttl)
-            C-->>O: changed keys
-            O->>C: sweep_expired()
-            C-->>O: expired keys (reset to 0)
-            O->>R: update_commitments_batch(updates)
-        else Failure
-            O->>O: exponential backoff (1s → 5min)
-            O->>C: extend_ttls(offline_ttl)
+    Note over O: Spawned from Ring::new()
+    Note over O: Checks LEPUS_DEPOSIT_INDEX_KEY
+
+    O->>Sub: spawn subscribe_to_deposit_index()
+    Sub->>DI: subscribe::request_subscribe()
+    Note over Sub: Receives state updates via subscription
+
+    alt Relayer configured (LEPUS_RPC_URL set)
+        O->>Rel: spawn relay_deposit_proofs()
+        loop Every poll_interval (60s)
+            Rel->>S: query_deposit_events(since_ledger)
+            S-->>Rel: [ledger_seq, ...]
+            loop For each new ledger
+                Rel->>S: fetch_proof_for_ledger(seq)
+                S-->>Rel: DepositProof (SCP envelopes + tx data)
+                Rel->>DI: update::request_update(delta=proof)
+            end
         end
     end
+
+    Note over DI: On state change, subscription pushes to all subscribers
+    DI-->>R: UPDATE with new DepositMap state
+    R->>R: check_deposit_index_update()
+    R->>R: update_commitments_batch(matched deposits)
 ```
 
-**Code reference:** `crates/core/src/ring/hosting/oracle.rs:299-418`
+**Subscriber path (all lepus nodes):** Subscribes to the deposit-index contract. When the contract state updates, `check_deposit_index_update()` matches deposit entries to locally hosted contracts and feeds amounts into CWP commitment scores.
+
+**Relayer path (nodes with Stellar RPC access):** Polls Stellar for new ledgers with DEPOSIT events, fetches SCP proof bundles, and submits them as UPDATE deltas to the deposit-index contract. The deposit-index WASM contract verifies the SCP proofs before accepting the update.
+
+**Code references:**
+- Subscriber hook: `crates/core/src/ring/hosting/deposit_index.rs`
+- Oracle worker: `crates/core/src/ring/hosting/oracle.rs`
+- UPDATE hook: `crates/core/src/operations/update.rs:1213-1222`
 
 ### Subscription Handshake (Subscriber Identity)
 
@@ -203,13 +227,18 @@ During SUBSCRIBE, the subscriber proves key ownership:
 
 ### Environment Variables
 
-| Variable | Purpose | Example |
-|----------|---------|---------|
-| `LEPUS_RPC_URL` | Soroban RPC endpoint | `https://soroban-testnet.stellar.org` |
-| `LEPUS_CONTRACT_ADDRESS` | Deployed hvym-freenet-service address | `CABCDEF...` |
-| `LEPUS_POLL_INTERVAL_SECS` | Oracle poll interval (seconds) | `60` |
-| `LEPUS_STELLAR_PUBKEY` | Node's Ed25519 public key (hex, 32 bytes) | `a1b2c3...` |
-| `LEPUS_STELLAR_SECRET` | Node's Ed25519 secret key (hex, 32 bytes) for transport key derivation | `d4e5f6...` |
+| Variable | Required By | Purpose | Example |
+|----------|-------------|---------|---------|
+| `LEPUS_DEPOSIT_INDEX_KEY` | All lepus nodes | Hex 32-byte deposit-index `ContractInstanceId` | `a1b2c3...` (64 hex chars) |
+| `LEPUS_DEPOSIT_INDEX_CODE_HASH` | Relayer nodes | Hex 32-byte deposit-index `CodeHash` | `d4e5f6...` (64 hex chars) |
+| `LEPUS_RPC_URL` | Relayer nodes | Stellar RPC endpoint for fetching SCP proofs | `https://horizon-testnet.stellar.org` |
+| `LEPUS_POLL_INTERVAL_SECS` | Relayer nodes | Relayer poll interval (seconds) | `60` |
+| `LEPUS_STELLAR_PUBKEY` | Identity verification | Node's Ed25519 public key (hex, 32 bytes) | `a1b2c3...` (64 hex chars) |
+| `LEPUS_STELLAR_SECRET` | Transport key derivation | Node's Ed25519 secret key (hex, 32 bytes) | `d4e5f6...` (64 hex chars) |
+
+**Node roles:**
+- **Subscriber** (all lepus nodes): Set `LEPUS_DEPOSIT_INDEX_KEY`. The node subscribes to the deposit-index contract and receives commitment updates automatically.
+- **Relayer** (nodes with Stellar access): Also set `LEPUS_RPC_URL` and `LEPUS_DEPOSIT_INDEX_CODE_HASH`. The node fetches SCP proofs from Stellar and submits them to the deposit-index contract.
 
 ### Feature Flag
 
@@ -236,17 +265,19 @@ All CWP code is behind `#[cfg(feature = "lepus")]`. When disabled, the crate com
 | File | Purpose |
 |------|---------|
 | `crates/core/src/ring/hosting/cache.rs` | CWP structs, scoring, eviction |
-| `crates/core/src/ring/hosting/oracle.rs` | Soroban oracle background worker |
+| `crates/core/src/ring/hosting/oracle.rs` | Dual-mode oracle (subscriber + relayer) |
+| `crates/core/src/ring/hosting/deposit_index.rs` | Deposit-index types, config, subscriber hook |
 | `crates/core/src/ring/hosting/identity.rs` | Identity envelope verification |
 | `crates/core/src/ring/hosting.rs` | HostingManager delegation layer |
 | `crates/core/src/ring/mod.rs` | Ring-level CWP method delegation |
 | `crates/core/src/operations/get.rs` | Contribution tracking (bytes served/consumed) |
 | `crates/core/src/operations/put.rs` | Identity verification hooks |
-| `crates/core/src/operations/update.rs` | Identity verification hook |
+| `crates/core/src/operations/update.rs` | Identity + deposit-index hooks |
 | `crates/core/src/operations/subscribe.rs` | Subscriber identity handshake |
 | `crates/core/src/config/secret.rs` | Stellar key derivation for transport |
 | `crates/core/src/transport/crypto.rs` | Ed25519 to X25519 key conversion |
-| `contracts/hvym-freenet-service/` | Soroban contract for XLM deposits |
+| `contracts/hvym-freenet-service/` | Soroban contract for XLM deposits (Phase A) |
+| `contracts/deposit-index/` | Freenet WASM contract for SCP-verified deposits (Phase B) |
 | `contracts/datapod/` | WASM contract for identity envelopes |
 
 ## Implementation Phases
@@ -254,14 +285,20 @@ All CWP code is behind `#[cfg(feature = "lepus")]`. When disabled, the crate com
 | Phase | Description | Status |
 |-------|-------------|--------|
 | 1 | CWP cache scoring and eviction | Complete |
-| 2 | Soroban commitment oracle and persistence deposits | Complete |
+| 2 | Soroban commitment oracle and persistence deposits | Complete (superseded by Phase C) |
 | 3 | Identity envelope verification and subscriber matching | Complete |
 | 4 | Datapod validation, subscription identity, transport key derivation | Complete |
 | 5 | JSON encoding protocol, datapod contract, Lepus CI | Complete |
+| A | Event-based Soroban contract with burn+treasury model | Complete |
+| B | Deposit-index WASM contract with SCP proof verification | Complete |
+| C | Node-side integration: deposit-index subscriber + Stellar proof relayer | Complete |
+
+**Phase evolution:** The original Phase 2 (direct Soroban RPC polling) was replaced by Phases A/B/C. Instead of each node polling Soroban directly, a WASM contract on the Freenet network itself maintains a verified deposit map. Nodes subscribe to this contract for updates, and relayer nodes bridge data from Stellar via SCP proofs. This reduces Stellar RPC load and leverages Freenet's existing subscription infrastructure.
 
 ## Related Documentation
 
 - [Stellar Contract](stellar-contract.md) — Soroban deposit contract (`hvym-freenet-service`)
+- [Deposit-Index Contract](deposit-index-contract.md) — Freenet WASM contract for SCP-verified deposits
 - [Datapod Contract](datapod-contract.md) — WASM identity validator
 - [Ring Architecture](../ring/README.md) — DHT topology and hosting
 - [Operations](../operations/README.md) — Operation state machines

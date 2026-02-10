@@ -74,73 +74,42 @@ All persistent storage entries are automatically bumped on access:
 
 **Code reference:** `contracts/hvym-freenet-service/src/storage.rs:5-8`
 
-## Oracle Integration
+## Integration with Freenet Nodes
 
-The `OracleWorker` bridges the Soroban contract and the Freenet node's CWP cache.
+The hvym-freenet-service Soroban contract emits `DEPOSIT` events when users deposit XLM for Freenet contracts. These events are bridged to the Freenet network via the **deposit-index contract** and **relayer nodes**.
 
-### Poll Cycle
+### Data Flow
 
 ```mermaid
-sequenceDiagram
-    participant O as OracleWorker
-    participant R as Ring
-    participant S as Soroban RPC
-    participant C as CommitmentCache
-
-    Note over O: Spawned from Ring::new()
-    Note over O: Random 10-30s initial delay
-
-    loop Every 60s (configurable)
-        O->>R: hosted_contract_keys()
-        R-->>O: Vec<ContractKey>
-
-        alt Keys not empty
-            O->>S: query_deposits(keys)
-            alt RPC Success
-                S-->>O: Vec<CommitmentRecord>
-                O->>C: update(records, 5min TTL)
-                C-->>O: changed: Vec<(key, xlm)>
-                O->>C: sweep_expired()
-                C-->>O: expired: Vec<(key, 0)>
-                O->>R: update_commitments_batch(changed + expired)
-                Note over R: HostingCache.commitment.deposited_xlm updated
-            else RPC Failure
-                O->>O: backoff *= 2 (cap 5min)
-                O->>C: extend_ttls(30min)
-                Note over C: Prevents deposit loss during outages
-            end
-        end
-    end
+flowchart LR
+    User["User deposits XLM"] --> Soroban["hvym-freenet-service<br/>(Soroban)"]
+    Soroban -->|"DEPOSIT event"| Relayer["Relayer Node"]
+    Relayer -->|"SCP proof as UPDATE delta"| DepIdx["Deposit-Index<br/>WASM Contract"]
+    DepIdx -->|"subscription push"| Nodes["All Lepus Nodes"]
+    Nodes -->|"update_commitments_batch"| CWP["CWP Scores"]
 ```
 
-**Code reference:** `crates/core/src/ring/hosting/oracle.rs:299-418`
+1. Users deposit XLM via the Soroban contract
+2. Relayer nodes poll Stellar for new ledgers with DEPOSIT events
+3. Relayers fetch SCP proofs and submit them as UPDATE deltas to the deposit-index Freenet contract
+4. The deposit-index contract verifies the SCP proofs and updates its state
+5. All lepus nodes receive the updated state via subscription
+6. Each node matches deposits to locally hosted contracts and updates CWP commitment scores
 
-### CommitmentCache
+This replaces the original design where each node polled Soroban directly. The deposit-index contract acts as a verified bridge, reducing Stellar RPC load and leveraging Freenet's subscription infrastructure.
 
-An in-memory TTL-managed cache that sits between the Soroban RPC and the hosting cache:
+See [Deposit-Index Contract](deposit-index-contract.md) for details on the verification pipeline and node-side integration.
 
-| Method | Purpose |
-|--------|---------|
-| `update(records, ttl)` | Insert/update records, return keys with changed deposit amounts |
-| `extend_ttls(duration)` | Extend all entry TTLs (used during RPC outages) |
-| `sweep_expired()` | Remove expired entries, return their keys with deposit reset to 0 |
-
-The cache provides **diff detection**: only keys whose deposit amount actually changed are pushed to the Ring, avoiding unnecessary cache writes.
-
-**Code reference:** `crates/core/src/ring/hosting/oracle.rs:211-279`
-
-### Failure Handling
+### Failure Handling (Relayer)
 
 | Scenario | Behavior |
 |----------|----------|
-| RPC timeout / error | Increment `consecutive_failures`, exponential backoff |
+| Stellar RPC timeout / error | Increment `consecutive_failures`, exponential backoff |
 | Backoff schedule | 1s, 2s, 4s, 8s, ... capped at 300s (5 minutes) |
-| During outage | Cache TTLs extended by `offline_ttl` (30 minutes) |
 | Recovery | First successful query resets backoff to 0 |
+| UPDATE submission failure | Skip ledger, retry next cycle |
 
-Backoff prevents hammering an unhealthy RPC endpoint. TTL extension ensures that deposit data isn't lost during transient Soroban outages — existing commitment scores remain valid until the RPC recovers.
-
-**Code reference:** `crates/core/src/ring/hosting/oracle.rs:294-297` (constants), `crates/core/src/ring/hosting/oracle.rs:400-416` (failure path)
+**Code reference:** `crates/core/src/ring/hosting/oracle.rs`
 
 ## Deployment
 
@@ -191,4 +160,5 @@ The deploy script handles contract installation and initialization with an admin
 ## Related Documentation
 
 - [Lepus Overview](README.md) — CWP scoring and architecture
+- [Deposit-Index Contract](deposit-index-contract.md) — Freenet WASM contract for SCP-verified deposits
 - [Datapod Contract](datapod-contract.md) — WASM identity validator
